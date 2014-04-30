@@ -1,0 +1,67 @@
+# Opal CDN distribution
+
+## URL scheme
+
+    //cdn.opalrb.org/opal/<VERSION>/opal.js
+    //cdn.opalrb.org/opal/<VERSION>/opal.min.js
+    //cdn.opalrb.org/opal/<VERSION>/opal.min.js.gz
+
+Where `<VERSION>` is the desired version number or `current`, examples:
+
+    //cdn.opalrb.org/opal/0.6.2/opal.js
+    //cdn.opalrb.org/opal/0.5.5/date.min.js
+    //cdn.opalrb.org/opal/current/base64.min.js.gz
+
+
+## Embedding in your HTML
+
+```html
+<!doctype html>
+<html>
+<head>
+  <script src="http://cdn.opalrb.org/opal/current/opal.min.js"></script>
+  <script src="http://cdn.opalrb.org/opal/current/native.min.js"></script>
+  <script src="http://cdn.opalrb.org/opal/current/opal-parser.min.js"></script>
+</head>
+<body>
+  <script type="text/ruby">
+  #<![CDATA[
+    puts 'Hello from the console!'
+    $$[:document].write %{
+<!doctype html>
+<html>
+<head>
+  <style>body{font-family:sans-serif;font-weight:100;}</style>
+</head>
+<body>
+<h1 id="opal_cdn_distribution">Opal CDN distribution</h1>
+
+<h2 id="url_scheme">URL scheme</h2>
+
+<pre><code>//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.js
+//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.min.js
+//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.min.js.gz
+</code></pre>
+
+<p>Where <code>&lt;VERSION&gt;</code> is the desired version number or <code>current</code>, examples:</p>
+
+<pre><code>//cdn.opalrb.org/opal/0.6.2/opal.js
+//cdn.opalrb.org/opal/0.5.5/date.min.js
+//cdn.opalrb.org/opal/current/base64.min.js.gz
+</code></pre>
+
+<h2 id="license">License</h2>
+
+<p>See <a href="http://example.com/">http://opalrb.org</a>.</p>
+</body>
+</html>
+    }
+  #]]>
+  </script>
+</body>
+</html>
+```
+
+## License
+
+See [http://opalrb.org](http://example.com/).
