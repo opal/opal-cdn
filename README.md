@@ -66,13 +66,15 @@ Where `<VERSION>` is the desired version number or `current`, examples:
 
 ### Opal
 
+From the `opal` dir, assuming there's a checkout of the `gh-pages` branch of `opal-cdn` in the `cdn/` folder:
 
+    $ rake dist DIR=cdn/opal/0.7.0.dev
+    $ rake dist DIR=cdn/opal/master
 
+### External libraries
 
-### Other libraries
-
-    $ opal-build -ropal/browser browser > ~/Code/opal/cdn/gems/0.6.2/opal-browser-0.2.0.beta1.js
-    $ opal-build -ropal-jquery opal-jquery > ~/Code/opal/cdn/gems/0.6.2/opal-jquery-0.2.0.js
+    $ opal-build -ropal/browser browser     > cdn/external/0.6.2/opal-browser-0.2.0.beta1.js
+    $ opal-build -ropal-jquery  opal-jquery > cdn/external/0.6.2/opal-jquery-0.2.0.js
 
 
 ## License
