@@ -62,6 +62,19 @@ Where `<VERSION>` is the desired version number or `current`, examples:
 </html>
 ```
 
+## Updating
+
+### Opal
+
+
+
+
+### Other libraries
+
+    $ opal-build -ropal/browser browser > ~/Code/opal/cdn/gems/0.6.2/opal-browser-0.2.0.beta1.js
+    $ opal-build -ropal-jquery opal-jquery > ~/Code/opal/cdn/gems/0.6.2/opal-jquery-0.2.0.js
+
+
 ## License
 
 See [http://opalrb.org](http://example.com/).
