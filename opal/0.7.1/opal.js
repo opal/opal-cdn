@@ -12713,7 +12713,7 @@ Opal.modules["corelib/variables"] = function(Opal) {
   Opal.cdecl($scope, 'RUBY_PLATFORM', "opal");
   Opal.cdecl($scope, 'RUBY_ENGINE', "opal");
   Opal.cdecl($scope, 'RUBY_VERSION', "2.1.1");
-  Opal.cdecl($scope, 'RUBY_ENGINE_VERSION', "0.6.1");
+  Opal.cdecl($scope, 'RUBY_ENGINE_VERSION', "0.7.1");
   return Opal.cdecl($scope, 'RUBY_RELEASE_DATE', "2014-04-15");
 };
 
@@ -12887,4 +12887,3 @@ if (file == null) file = nil;
 })(Opal);
 
 //# sourceMappingURL=opal.map
-;
