@@ -1,4 +1,18 @@
 (function(undefined) {
+  // @note
+  //   A few conventions for the documentation of this file:
+  //   1. Always use "//" (in contrast with "/**/")
+  //   2. The syntax used is Yardoc (yardoc.org), which is intended for Ruby (se below)
+  //   3. `@param` and `@return` types should be preceded by `JS.` when referring to
+  //      JavaScript constructors (e.g. `JS.Function`) otherwise Ruby is assumed.
+  //   4. `nil` and `null` being unambiguous refer to the respective
+  //      objects/values in Ruby and JavaScript
+  //   5. This is still WIP :) so please give feedback and suggestions on how
+  //      to improve or for alternative solutions
+  //
+  //   The way the code is digested before going through Yardoc is a secret kept
+  //   in the docs repo (https://github.com/opal/docs/tree/master).
+
   if (typeof(this.Opal) !== 'undefined') {
     console.warn('Opal already loaded. Loading twice can cause troubles, please fix your setup.');
     return this.Opal;
@@ -55,6 +69,12 @@
   // This is a useful reference to global object inside ruby files
   Opal.global = this;
 
+  // Configure runtime behavior with regards to require and unsupported fearures
+  Opal.config = {
+    missing_require_severity: 'error', // error, warning, ignore
+    unsupported_features_severity: 'warning' // error, warning, ignore
+  }
+
   // Minify common function calls
   var $hasOwn = Opal.hasOwnProperty;
   var $slice  = Opal.slice = Array.prototype.slice;
@@ -85,6 +105,16 @@
   // keeps track of exceptions for $!
   Opal.exceptions = [];
 
+  // @private
+  // Pops an exception from the stack and updates `$!`.
+  Opal.pop_exception = function() {
+    Opal.gvars["!"] = Opal.exceptions.pop() || nil;
+  }
+
+
+  // Constants
+  // ---------
+
   // Get a constant on the given scope. Every class and module in Opal has a
   // scope used to store, and inherit, constants. For example, the top level
   // `Object` in ruby has a scope accessible as `Opal.Object.$$scope`.
@@ -97,8 +127,8 @@
   // class/module's `#const_method` is called, which by default will raise an
   // error.
   //
-  // @param [String] name the name of the constant to lookup
-  // @return [RubyObject]
+  // @param name [String] the name of the constant to lookup
+  // @return [Object]
   //
   Opal.get = function(name) {
     var constant = this[name];
@@ -133,573 +163,7 @@
       Opal.cdecl(base_scope, id, klass);
       const_alloc.displayName = id+"_scope_alloc";
     }
-  }
-
-  // A `class Foo; end` expression in ruby is compiled to call this runtime
-  // method which either returns an existing class of the given name, or creates
-  // a new class in the given `base` scope.
-  //
-  // If a constant with the given name exists, then we check to make sure that
-  // it is a class and also that the superclasses match. If either of these
-  // fail, then we raise a `TypeError`. Note, superklass may be null if one was
-  // not specified in the ruby code.
-  //
-  // We pass a constructor to this method of the form `function ClassName() {}`
-  // simply so that classes show up with nicely formatted names inside debuggers
-  // in the web browser (or node/sprockets).
-  //
-  // The `base` is the current `self` value where the class is being created
-  // from. We use this to get the scope for where the class should be created.
-  // If `base` is an object (not a class/module), we simple get its class and
-  // use that as the base instead.
-  //
-  // @param base        [Object] where the class is being created
-  // @param superklass  [Class,null] superclass of the new class (may be null)
-  // @param id          [String] the name of the class to be created
-  // @param constructor [Function] function to use as constructor
-  //
-  // @return new [Class]  or existing ruby class
-  //
-  Opal.klass = function(base, superklass, id, constructor) {
-    var klass, bridged, alloc;
-
-    // If base is an object, use its class
-    if (!base.$$is_class && !base.$$is_module) {
-      base = base.$$class;
-    }
-
-    // If the superclass is a function then we're bridging a native JS class
-    if (typeof(superklass) === 'function') {
-      bridged = superklass;
-      superklass = _Object;
-    }
-
-    // Try to find the class in the current scope
-    klass = base.$$scope[id];
-
-    // If the class exists in the scope, then we must use that
-    if (klass && klass.$$orig_scope === base.$$scope) {
-      // Make sure the existing constant is a class, or raise error
-      if (!klass.$$is_class) {
-        throw Opal.TypeError.$new(id + " is not a class");
-      }
-
-      // Make sure existing class has same superclass
-      if (superklass && klass.$$super !== superklass) {
-        throw Opal.TypeError.$new("superclass mismatch for class " + id);
-      }
-
-      return klass;
-    }
-
-    // Class doesnt exist, create a new one with given superclass...
-
-    // Not specifying a superclass means we can assume it to be Object
-    if (superklass == null) {
-      superklass = _Object;
-    }
-
-    // If bridged the JS class will also be the alloc function
-    alloc = bridged || boot_class_alloc(id, constructor, superklass);
-
-    // Create the class object (instance of Class)
-    klass = boot_class_object(id, superklass, alloc);
-
-    // Name the class
-    klass.$$name = id;
-    klass.displayName = id;
-
-    // Mark the object as a class
-    klass.$$is_class = true;
-
-    // Every class gets its own constant scope, inherited from current scope
-    Opal.create_scope(base.$$scope, klass, id);
-
-    // Name new class directly onto current scope (Opal.Foo.Baz = klass)
-    base[id] = base.$$scope[id] = klass;
-
-    if (bridged) {
-      Opal.bridge(klass, alloc);
-    }
-    else {
-      // Copy all parent constants to child, unless parent is Object
-      if (superklass !== _Object && superklass !== BasicObject) {
-        donate_constants(superklass, klass);
-      }
-
-      // Call .inherited() hook with new class on the superclass
-      if (superklass.$inherited) {
-        superklass.$inherited(klass);
-      }
-    }
-
-    return klass;
   };
-
-  // Create generic class with given superclass.
-  Opal.boot_class = function(superklass, constructor) {
-    var alloc = boot_class_alloc(null, constructor, superklass)
-
-    return boot_class_object(null, superklass, alloc);
-  }
-
-  // The class object itself (as in `Class.new`)
-  //
-  // @param superklass [(Opal) Class] Another class object (as in `Class.new`)
-  // @param alloc      [constructor]  The constructor that holds the prototype
-  //                                  that will be used for instances of the
-  //                                  newly constructed class.
-  function boot_class_object(id, superklass, alloc) {
-    // Grab the superclass prototype and use it to build an intermediary object
-    // in the prototype chain.
-    function Superclass_alloc_proxy() {};
-    Superclass_alloc_proxy.prototype = superklass.constructor.prototype;
-    function SingletonClass_alloc() {}
-    SingletonClass_alloc.prototype = new Superclass_alloc_proxy();
-
-    if (id) {
-      SingletonClass_alloc.displayName = "SingletonClass_alloc("+id+")";
-    }
-
-    // The built class is the only instance of its singleton_class
-    var klass = new SingletonClass_alloc();
-
-    setup_module_or_class_object(klass, SingletonClass_alloc, superklass, alloc.prototype);
-
-    // @property $$alloc This is the constructor of instances of the current
-    //                   class. Its prototype will be used for method lookup
-    klass.$$alloc = alloc;
-
-    // @property $$proto.$$class Make available to instances a reference to the
-    //                           class they belong to.
-    klass.$$proto.$$class = klass;
-
-    return klass;
-  }
-
-  // Adds common/required properties to a module or class object
-  // (as in `Module.new` / `Class.new`)
-  //
-  // @param module      The module or class that needs to be prepared
-  //
-  // @param constructor The constructor of the module or class itself,
-  //                    usually it's already assigned by using `new`. Some
-  //                    ipothesis on why it's needed can be found below.
-  //
-  // @param superklass  The superclass of the class/module object, for modules
-  //                    is `Module` (of `Module` in JS context)
-  //
-  // @param prototype   The prototype on which the class/module methods will
-  //                    be stored.
-  //
-  function setup_module_or_class_object(module, constructor, superklass, prototype) {
-    // @property $$id Each class is assigned a unique `id` that helps
-    //                comparation and implementation of `#object_id`
-    module.$$id = Opal.uid();
-
-    // @property $$proto This is the prototype on which methods will be defined
-    module.$$proto = prototype;
-
-    // @property constructor keeps a ref to the constructor, but apparently the
-    //                       constructor is already set on:
-    //
-    //                          `var module = new constructor` is called.
-    //
-    //                       Maybe there are some browsers not abiding (IE6?)
-    module.constructor = constructor;
-
-    if (superklass === Module) {
-      // @property $$is_module Clearly mark this as a module
-      module.$$is_module = true;
-      module.$$class     = Module;
-    }
-    else {
-      // @property $$is_class Clearly mark this as a class
-      module.$$is_class = true;
-      module.$$class    = Class;
-    }
-
-    // @property $$super the superclass, doesn't get changed by module inclusions
-    module.$$super = superklass;
-
-    // @property $$parent direct parent class or module
-    //                    starts with the superclass, after module inclusion is
-    //                    the last included module
-    module.$$parent = superklass;
-
-    // @property $$inc included modules
-    module.$$inc = [];
-  }
-
-  // Define new module (or return existing module). The given `base` is basically
-  // the current `self` value the `module` statement was defined in. If this is
-  // a ruby module or class, then it is used, otherwise if the base is a ruby
-  // object then that objects real ruby class is used (e.g. if the base is the
-  // main object, then the top level `Object` class is used as the base).
-  //
-  // If a module of the given name is already defined in the base, then that
-  // instance is just returned.
-  //
-  // If there is a class of the given name in the base, then an error is
-  // generated instead (cannot have a class and module of same name in same base).
-  //
-  // Otherwise, a new module is created in the base with the given name, and that
-  // new instance is returned back (to be referenced at runtime).
-  //
-  // @param  base [Module, Class] class or module this definition is inside
-  // @param  id [String] the name of the new (or existing) module
-  // @return [Module]
-  //
-  Opal.module = function(base, id) {
-    var module;
-
-    if (!base.$$is_class && !base.$$is_module) {
-      base = base.$$class;
-    }
-
-    if ($hasOwn.call(base.$$scope, id)) {
-      module = base.$$scope[id];
-
-      if (!module.$$is_module && module !== _Object) {
-        throw Opal.TypeError.$new(id + " is not a module");
-      }
-    }
-    else {
-      module = boot_module_object();
-
-      // name module using base (e.g. Foo or Foo::Baz)
-      module.$$name = id;
-
-      // mark the object as a module
-      module.$$is_module = true;
-
-      // initialize dependency tracking
-      module.$$dep = [];
-
-      Opal.create_scope(base.$$scope, module, id);
-
-      // Name new module directly onto current scope (Opal.Foo.Baz = module)
-      base[id] = base.$$scope[id] = module;
-    }
-
-    return module;
-  };
-
-  // Internal function to create a new module instance. This simply sets up
-  // the prototype hierarchy and method tables.
-  //
-  function boot_module_object() {
-    var mtor = function() {};
-    mtor.prototype = Module_alloc.prototype;
-
-    function module_constructor() {}
-    module_constructor.prototype = new mtor();
-
-    var module = new module_constructor();
-    var module_prototype = {};
-
-    setup_module_or_class_object(module, module_constructor, Module, module_prototype);
-
-    return module;
-  }
-
-  // Make `boot_module_object` available to the JS-API
-  Opal.boot_module_object = boot_module_object;
-
-  // Return the singleton class for the passed object.
-  //
-  // If the given object alredy has a singleton class, then it will be stored on
-  // the object as the `$$meta` property. If this exists, then it is simply
-  // returned back.
-  //
-  // Otherwise, a new singleton object for the class or object is created, set on
-  // the object at `$$meta` for future use, and then returned.
-  //
-  // @param [RubyObject] object the ruby object
-  // @return [RubyClass] the singleton class for object
-  //
-  Opal.get_singleton_class = function(object) {
-    if (object.$$meta) {
-      return object.$$meta;
-    }
-
-    if (object.$$is_class || object.$$is_module) {
-      return build_class_singleton_class(object);
-    }
-
-    return build_object_singleton_class(object);
-  };
-
-  // Build the singleton class for an existing class.
-  //
-  // NOTE: Actually in MRI a class' singleton class inherits from its
-  // superclass' singleton class which in turn inherits from Class.
-  //
-  // @param [RubyClass] klass
-  // @return [RubyClass]
-  //
-  function build_class_singleton_class(klass) {
-    var meta = new Opal.Class.$$alloc();
-
-    meta.$$class = Opal.Class;
-    meta.$$proto = klass.constructor.prototype;
-
-    meta.$$is_singleton = true;
-    meta.$$singleton_of = klass;
-    meta.$$inc          = [];
-    meta.$$scope        = klass.$$scope;
-
-    return klass.$$meta = meta;
-  }
-
-  // Build the singleton class for a Ruby (non class) Object.
-  //
-  // @param [RubyObject] object
-  // @return [RubyClass]
-  //
-  function build_object_singleton_class(object) {
-    var orig_class = object.$$class,
-        class_id   = "#<Class:#<" + orig_class.$$name + ":" + orig_class.$$id + ">>";
-
-    var Singleton = function() {};
-    var meta = Opal.boot_class(orig_class, Singleton);
-    meta.$$name   = class_id;
-
-    meta.$$proto  = object;
-    meta.$$class  = orig_class.$$class;
-    meta.$$scope  = orig_class.$$scope;
-    meta.$$parent = orig_class;
-    meta.$$is_singleton = true;
-    meta.$$singleton_of = object;
-
-    return object.$$meta = meta;
-  }
-
-  // Bridges a single method.
-  function bridge_method(target, from, name, body) {
-    var ancestors, i, ancestor, length;
-
-    ancestors = target.$$bridge.$ancestors();
-
-    // order important here, we have to check for method presence in
-    // ancestors from the bridged class to the last ancestor
-    for (i = 0, length = ancestors.length; i < length; i++) {
-      ancestor = ancestors[i];
-
-      if ($hasOwn.call(ancestor.$$proto, name) &&
-          ancestor.$$proto[name] &&
-          !ancestor.$$proto[name].$$donated &&
-          !ancestor.$$proto[name].$$stub &&
-          ancestor !== from) {
-        break;
-      }
-
-      if (ancestor === from) {
-        target.prototype[name] = body
-        break;
-      }
-    }
-
-  }
-
-  // Bridges from *donator* to a *target*.
-  function _bridge(target, donator) {
-    var id, methods, method, i, bridged;
-
-    if (typeof(target) === "function") {
-      id      = donator.$__id__();
-      methods = donator.$instance_methods();
-
-      for (i = methods.length - 1; i >= 0; i--) {
-        method = '$' + methods[i];
-
-        bridge_method(target, donator, method, donator.$$proto[method]);
-      }
-
-      if (!bridges[id]) {
-        bridges[id] = [];
-      }
-
-      bridges[id].push(target);
-    }
-    else {
-      bridged = bridges[target.$__id__()];
-
-      if (bridged) {
-        for (i = bridged.length - 1; i >= 0; i--) {
-          _bridge(bridged[i], donator);
-        }
-
-        bridges[donator.$__id__()] = bridged.slice();
-      }
-    }
-  }
-
-  // The actual inclusion of a module into a class.
-  //
-  // ## Class `$$parent` and `iclass`
-  //
-  // To handle `super` calls, every class has a `$$parent`. This parent is
-  // used to resolve the next class for a super call. A normal class would
-  // have this point to its superclass. However, if a class includes a module
-  // then this would need to take into account the module. The module would
-  // also have to then point its `$$parent` to the actual superclass. We
-  // cannot modify modules like this, because it might be included in more
-  // then one class. To fix this, we actually insert an `iclass` as the class'
-  // `$$parent` which can then point to the superclass. The `iclass` acts as
-  // a proxy to the actual module, so the `super` chain can then search it for
-  // the required method.
-  //
-  // @param [RubyModule] module the module to include
-  // @param [RubyClass] klass the target class to include module into
-  // @return [null]
-  //
-  Opal.append_features = function(module, klass) {
-    var iclass, donator, prototype, methods, id, i;
-
-    // check if this module is already included in the class
-    for (i = klass.$$inc.length - 1; i >= 0; i--) {
-      if (klass.$$inc[i] === module) {
-        return;
-      }
-    }
-
-    klass.$$inc.push(module);
-    module.$$dep.push(klass);
-    _bridge(klass, module);
-
-    // iclass
-    iclass = {
-      $$name:   module.$$name,
-      $$proto:  module.$$proto,
-      $$parent: klass.$$parent,
-      $$module: module,
-      $$iclass: true
-    };
-
-    klass.$$parent = iclass;
-
-    donator   = module.$$proto;
-    prototype = klass.$$proto;
-    methods   = module.$instance_methods();
-
-    for (i = methods.length - 1; i >= 0; i--) {
-      id = '$' + methods[i];
-
-      // if the target class already has a method of the same name defined
-      // and that method was NOT donated, then it must be a method defined
-      // by the class so we do not want to override it
-      if ( prototype.hasOwnProperty(id) &&
-          !prototype[id].$$donated &&
-          !prototype[id].$$stub) {
-        continue;
-      }
-
-      prototype[id] = donator[id];
-      prototype[id].$$donated = module;
-    }
-
-    donate_constants(module, klass);
-  };
-
-  // Boot a base class (makes instances).
-  function boot_class_alloc(id, constructor, superklass) {
-    if (superklass) {
-      var alloc_proxy = function() {};
-      alloc_proxy.prototype  = superklass.$$proto || superklass.prototype;
-      constructor.prototype = new alloc_proxy();
-    }
-
-    if (id) {
-      constructor.displayName = id+'_alloc';
-    }
-
-    constructor.prototype.constructor = constructor;
-
-    return constructor;
-  }
-
-  // Builds the class object for core classes:
-  // - make the class object have a singleton class
-  // - make the singleton class inherit from its parent singleton class
-  //
-  // @param id         [String]      the name of the class
-  // @param alloc      [Function]    the constructor for the core class instances
-  // @param superclass [Class alloc] the constructor of the superclass
-  //
-  function boot_core_class_object(id, alloc, superclass) {
-    var superclass_constructor = function() {};
-        superclass_constructor.prototype = superclass.prototype;
-
-    var singleton_class = function() {};
-        singleton_class.prototype = new superclass_constructor();
-
-    singleton_class.displayName = "#<Class:"+id+">";
-
-    // the singleton_class acts as the class object constructor
-    var klass = new singleton_class();
-
-    setup_module_or_class_object(klass, singleton_class, superclass, alloc.prototype);
-
-    klass.$$alloc     = alloc;
-    klass.$$name      = id;
-    klass.displayName = id;
-
-    // Give all instances a ref to their class
-    alloc.prototype.$$class = klass;
-
-    Opal[id] = klass;
-    Opal.constants.push(id);
-
-    return klass;
-  }
-
-  // For performance, some core Ruby classes are toll-free bridged to their
-  // native JavaScript counterparts (e.g. a Ruby Array is a JavaScript Array).
-  //
-  // This method is used to setup a native constructor (e.g. Array), to have
-  // its prototype act like a normal Ruby class. Firstly, a new Ruby class is
-  // created using the native constructor so that its prototype is set as the
-  // target for th new class. Note: all bridged classes are set to inherit
-  // from Object.
-  //
-  // Example:
-  //
-  //    Opal.bridge(self, Function);
-  //
-  // @param [Class] klass the Ruby class to bridge
-  // @param [Function] constructor native JavaScript constructor to use
-  // @return [Class] returns the passed Ruby class
-  //
-  Opal.bridge = function(klass, constructor) {
-    if (constructor.$$bridge) {
-      throw Opal.ArgumentError.$new("already bridged");
-    }
-
-    Opal.stub_subscribers.push(constructor.prototype);
-
-    constructor.prototype.$$class = klass;
-    constructor.$$bridge          = klass;
-
-    var ancestors = klass.$ancestors();
-
-    // order important here, we have to bridge from the last ancestor to the
-    // bridged class
-    for (var i = ancestors.length - 1; i >= 0; i--) {
-      _bridge(constructor, ancestors[i]);
-    }
-
-    for (var name in BasicObject_alloc.prototype) {
-      var method = BasicObject_alloc.prototype[method];
-
-      if (method && method.$$stub && !(name in constructor.prototype)) {
-        constructor.prototype[name] = method;
-      }
-    }
-
-    return klass;
-  }
-
 
   // Constant assignment, see also `Opal.cdecl`
   //
@@ -741,14 +205,36 @@
     }
 
     scope.constants.push(name);
-    return scope[name] = value;
+    scope[name] = value;
+
+    // If we dynamically declare a constant in a module,
+    // we should populate all the classes that include this module
+    // with the same constant
+    if (base_module.$$is_module && base_module.$$dep) {
+      for (var i = 0; i < base_module.$$dep.length; i++) {
+        var dep = base_module.$$dep[i];
+        Opal.casgn(dep, name, value);
+      }
+    }
+
+    return value;
   };
 
-  // constant decl
+  // Constant declaration
+  //
+  // @example
+  //   FOO = :bar
+  //
+  // @param base_scope [$$scope] the current scope
+  // @param name       [String] the name of the constant
+  // @param value      [Object] the value of the constant
   Opal.cdecl = function(base_scope, name, value) {
     if ((value.$$is_class || value.$$is_module) && value.$$orig_scope == null) {
       value.$$name = name;
       value.$$orig_scope = base_scope;
+      // Here we should explicitly set a base module
+      // (a module where the constant was initially defined)
+      value.$$base_module = base_scope.base;
       base_scope.constructor[name] = value;
     }
 
@@ -756,10 +242,590 @@
     return base_scope[name] = value;
   };
 
+
+  // Modules & Classes
+  // -----------------
+
+  // A `class Foo; end` expression in ruby is compiled to call this runtime
+  // method which either returns an existing class of the given name, or creates
+  // a new class in the given `base` scope.
+  //
+  // If a constant with the given name exists, then we check to make sure that
+  // it is a class and also that the superclasses match. If either of these
+  // fail, then we raise a `TypeError`. Note, `superclass` may be null if one
+  // was not specified in the ruby code.
+  //
+  // We pass a constructor to this method of the form `function ClassName() {}`
+  // simply so that classes show up with nicely formatted names inside debuggers
+  // in the web browser (or node/sprockets).
+  //
+  // The `base` is the current `self` value where the class is being created
+  // from. We use this to get the scope for where the class should be created.
+  // If `base` is an object (not a class/module), we simple get its class and
+  // use that as the base instead.
+  //
+  // @param base        [Object] where the class is being created
+  // @param superclass  [Class,null] superclass of the new class (may be null)
+  // @param id          [String] the name of the class to be created
+  // @param constructor [JS.Function] function to use as constructor
+  //
+  // @return new [Class]  or existing ruby class
+  //
+  Opal.klass = function(base, superclass, name, constructor) {
+    var klass, bridged, alloc;
+
+    // If base is an object, use its class
+    if (!base.$$is_class && !base.$$is_module) {
+      base = base.$$class;
+    }
+
+    // If the superclass is a function then we're bridging a native JS class
+    if (typeof(superclass) === 'function') {
+      bridged = superclass;
+      superclass = _Object;
+    }
+
+    // Try to find the class in the current scope
+    klass = base.$$scope[name];
+
+    // If the class exists in the scope, then we must use that
+    if (klass && klass.$$orig_scope === base.$$scope) {
+      // Make sure the existing constant is a class, or raise error
+      if (!klass.$$is_class) {
+        throw Opal.TypeError.$new(name + " is not a class");
+      }
+
+      // Make sure existing class has same superclass
+      if (superclass && klass.$$super !== superclass) {
+        throw Opal.TypeError.$new("superclass mismatch for class " + name);
+      }
+
+      return klass;
+    }
+
+    // Class doesnt exist, create a new one with given superclass...
+
+    // Not specifying a superclass means we can assume it to be Object
+    if (superclass == null) {
+      superclass = _Object;
+    }
+
+    // If bridged the JS class will also be the alloc function
+    alloc = bridged || Opal.boot_class_alloc(name, constructor, superclass);
+
+    // Create the class object (instance of Class)
+    klass = Opal.setup_class_object(name, alloc, superclass.$$name, superclass.constructor);
+
+    // @property $$super the superclass, doesn't get changed by module inclusions
+    klass.$$super = superclass;
+
+    // @property $$parent direct parent class
+    //                    starts with the superclass, after klass inclusion is
+    //                    the last included klass
+    klass.$$parent = superclass;
+
+    // Every class gets its own constant scope, inherited from current scope
+    Opal.create_scope(base.$$scope, klass, name);
+
+    // Name new class directly onto current scope (Opal.Foo.Baz = klass)
+    base[name] = klass;
+
+    if (bridged) {
+      Opal.bridge(klass, alloc);
+    }
+    else {
+      // Copy all parent constants to child, unless parent is Object
+      if (superclass !== _Object && superclass !== BasicObject) {
+        Opal.donate_constants(superclass, klass);
+      }
+
+      // Call .inherited() hook with new class on the superclass
+      if (superclass.$inherited) {
+        superclass.$inherited(klass);
+      }
+    }
+
+    return klass;
+  };
+
+  // Boot a base class (makes instances).
+  //
+  // @param name [String,null] the class name
+  // @param constructor [JS.Function] the class' instances constructor/alloc function
+  // @param superclass  [Class,null] the superclass object
+  // @return [JS.Function] the consturctor holding the prototype for the class' instances
+  Opal.boot_class_alloc = function(name, constructor, superclass) {
+    if (superclass) {
+      var alloc_proxy = function() {};
+      alloc_proxy.prototype  = superclass.$$proto || superclass.prototype;
+      constructor.prototype = new alloc_proxy();
+    }
+
+    if (name) {
+      constructor.displayName = name+'_alloc';
+    }
+
+    constructor.prototype.constructor = constructor;
+
+    return constructor;
+  };
+
+  // Adds common/required properties to class object (as in `Class.new`)
+  //
+  // @param name  [String,null] The name of the class
+  //
+  // @param alloc [JS.Function] The constructor of the class' instances
+  //
+  // @param superclass_name [String,null]
+  //   The name of the super class, this is
+  //   usefule to build the `.displayName` of the singleton class
+  //
+  // @param superclass_alloc [JS.Function]
+  //   The constructor of the superclass from which the singleton_class is
+  //   derived.
+  //
+  // @return [Class]
+  Opal.setup_class_object = function(name, alloc, superclass_name, superclass_alloc) {
+    // Grab the superclass prototype and use it to build an intermediary object
+    // in the prototype chain.
+    var superclass_alloc_proxy = function() {};
+        superclass_alloc_proxy.prototype = superclass_alloc.prototype;
+        superclass_alloc_proxy.displayName = superclass_name;
+
+    var singleton_class_alloc = function() {}
+        singleton_class_alloc.prototype = new superclass_alloc_proxy();
+
+    // The built class is the only instance of its singleton_class
+    var klass = new singleton_class_alloc();
+
+    // @property $$alloc This is the constructor of instances of the current
+    //                   class. Its prototype will be used for method lookup
+    klass.$$alloc = alloc;
+
+    klass.$$name = name || nil;
+
+    // @property $$id Each class is assigned a unique `id` that helps
+    //                comparation and implementation of `#object_id`
+    klass.$$id = Opal.uid();
+
+    // Set a displayName for the singleton_class
+    singleton_class_alloc.displayName = "#<Class:"+(name || ("#<Class:"+klass.$$id+">"))+">";
+
+    // @property $$proto This is the prototype on which methods will be defined
+    klass.$$proto = alloc.prototype;
+
+    // @property $$proto.$$class Make available to instances a reference to the
+    //                           class they belong to.
+    klass.$$proto.$$class = klass;
+
+    // @property constructor keeps a ref to the constructor, but apparently the
+    //                       constructor is already set on:
+    //
+    //                          `var klass = new constructor` is called.
+    //
+    //                       Maybe there are some browsers not abiding (IE6?)
+    klass.constructor = singleton_class_alloc;
+
+    // @property $$is_class Clearly mark this as a class
+    klass.$$is_class = true;
+
+    // @property $$class Classes are instances of the class Class
+    klass.$$class    = Class;
+
+    // @property $$inc included modules
+    klass.$$inc = [];
+
+    return klass;
+  };
+
+  // Define new module (or return existing module). The given `base` is basically
+  // the current `self` value the `module` statement was defined in. If this is
+  // a ruby module or class, then it is used, otherwise if the base is a ruby
+  // object then that objects real ruby class is used (e.g. if the base is the
+  // main object, then the top level `Object` class is used as the base).
+  //
+  // If a module of the given name is already defined in the base, then that
+  // instance is just returned.
+  //
+  // If there is a class of the given name in the base, then an error is
+  // generated instead (cannot have a class and module of same name in same base).
+  //
+  // Otherwise, a new module is created in the base with the given name, and that
+  // new instance is returned back (to be referenced at runtime).
+  //
+  // @param  base [Module, Class] class or module this definition is inside
+  // @param  id   [String] the name of the new (or existing) module
+  //
+  // @return [Module]
+  Opal.module = function(base, name) {
+    var module;
+
+    if (!base.$$is_class && !base.$$is_module) {
+      base = base.$$class;
+    }
+
+    if ($hasOwn.call(base.$$scope, name)) {
+      module = base.$$scope[name];
+
+      if (!module.$$is_module && module !== _Object) {
+        throw Opal.TypeError.$new(name + " is not a module");
+      }
+    }
+    else {
+      module = Opal.module_allocate();
+      Opal.create_scope(base.$$scope, module, name);
+    }
+
+    return module;
+  };
+
+  // The implementation for Module#initialize
+  // @param module [Module]
+  // @param block [Proc,nil]
+  // @return nil
+  Opal.module_initialize = function(module, block) {
+    if (block !== nil) {
+      var block_self = block.$$s;
+      block.$$s = null;
+      block.call(module);
+      block.$$s = block_self;
+    }
+    return nil;
+  };
+
+  // Internal function to create a new module instance. This simply sets up
+  // the prototype hierarchy and method tables.
+  //
+  Opal.module_allocate = function() {
+    var mtor = function() {};
+    mtor.prototype = Module_alloc.prototype;
+
+    function module_constructor() {}
+    module_constructor.prototype = new mtor();
+
+    var module = new module_constructor();
+    var module_prototype = {};
+    var superclass = Module;
+
+    // @property $$id Each class is assigned a unique `id` that helps
+    //                comparation and implementation of `#object_id`
+    module.$$id = Opal.uid();
+
+    // Set the display name of the singleton prototype holder
+    module_constructor.displayName = "#<Class:#<Module:"+module.$$id+">>"
+
+    // @property $$proto This is the prototype on which methods will be defined
+    module.$$proto = module_prototype;
+
+    // @property constructor
+    //   keeps a ref to the constructor, but apparently the
+    //   constructor is already set on:
+    //
+    //      `var module = new constructor` is called.
+    //
+    //   Maybe there are some browsers not abiding (IE6?)
+    module.constructor = module_constructor;
+
+    // @property $$is_module Clearly mark this as a module
+    module.$$is_module = true;
+    module.$$class     = Module;
+
+    // @property $$super
+    //   the superclass, doesn't get changed by module inclusions
+    module.$$super = superclass;
+
+    // @property $$parent
+    //   direct parent class or module
+    //   starts with the superclass, after module inclusion is
+    //   the last included module
+    module.$$parent = superclass;
+
+    // @property $$inc included modules
+    module.$$inc = [];
+
+    // mark the object as a module
+    module.$$is_module = true;
+
+    // initialize dependency tracking
+    module.$$dep = [];
+
+    // initialize the name with nil
+    module.$$name = nil;
+
+    return module;
+  };
+
+  // Return the singleton class for the passed object.
+  //
+  // If the given object alredy has a singleton class, then it will be stored on
+  // the object as the `$$meta` property. If this exists, then it is simply
+  // returned back.
+  //
+  // Otherwise, a new singleton object for the class or object is created, set on
+  // the object at `$$meta` for future use, and then returned.
+  //
+  // @param object [Object] the ruby object
+  // @return [Class] the singleton class for object
+  Opal.get_singleton_class = function(object) {
+    if (object.$$meta) {
+      return object.$$meta;
+    }
+
+    if (object.$$is_class || object.$$is_module) {
+      return Opal.build_class_singleton_class(object);
+    }
+
+    return Opal.build_object_singleton_class(object);
+  };
+
+  // Build the singleton class for an existing class. Class object are built
+  // with their singleton class already in the prototype chain and inheriting
+  // from their superclass object (up to `Class` itself).
+  //
+  // NOTE: Actually in MRI a class' singleton class inherits from its
+  // superclass' singleton class which in turn inherits from Class.
+  //
+  // @param klass [Class]
+  // @return [Class]
+  Opal.build_class_singleton_class = function(object) {
+    var alloc, superclass, klass;
+
+    if (object.$$meta) {
+      return object.$$meta;
+    }
+
+    // The constructor and prototype of the singleton_class instances is the
+    // current class constructor and prototype.
+    alloc = object.constructor;
+
+    // The singleton_class superclass is the singleton_class of its superclass;
+    // but BasicObject has no superclass (its `$$super` is null), thus we
+    // fallback on `Class`.
+    superclass = object === BasicObject ? Class : Opal.build_class_singleton_class(object.$$super);
+
+    klass = Opal.setup_class_object(null, alloc, superclass.$$name, superclass.constructor);
+    klass.$$super = superclass;
+    klass.$$parent = superclass;
+
+    // The singleton_class retains the same scope as the original class
+    Opal.create_scope(object.$$scope, klass);
+
+    klass.$$is_singleton = true;
+    klass.$$singleton_of = object;
+
+    return object.$$meta = klass;
+  };
+
+  // Build the singleton class for a Ruby (non class) Object.
+  //
+  // @param object [Object]
+  // @return [Class]
+  Opal.build_object_singleton_class = function(object) {
+    var superclass = object.$$class,
+        name = "#<Class:#<" + superclass.$$name + ":" + superclass.$$id + ">>";
+
+    var alloc = Opal.boot_class_alloc(name, function(){}, superclass)
+    var klass = Opal.setup_class_object(name, alloc, superclass.$$name, superclass.constructor);
+
+    klass.$$super  = superclass;
+    klass.$$parent = superclass;
+    klass.$$class  = superclass.$$class;
+    klass.$$scope  = superclass.$$scope;
+    klass.$$proto  = object;
+
+    klass.$$is_singleton = true;
+    klass.$$singleton_of = object;
+
+    return object.$$meta = klass;
+  };
+
+  // Bridges a single method.
+  Opal.bridge_method = function(target, from, name, body) {
+    var ancestors, i, ancestor, length;
+
+    ancestors = target.$$bridge.$ancestors();
+
+    // order important here, we have to check for method presence in
+    // ancestors from the bridged class to the last ancestor
+    for (i = 0, length = ancestors.length; i < length; i++) {
+      ancestor = ancestors[i];
+
+      if ($hasOwn.call(ancestor.$$proto, name) &&
+          ancestor.$$proto[name] &&
+          !ancestor.$$proto[name].$$donated &&
+          !ancestor.$$proto[name].$$stub &&
+          ancestor !== from) {
+        break;
+      }
+
+      if (ancestor === from) {
+        target.prototype[name] = body
+        break;
+      }
+    }
+
+  };
+
+  // Bridges from *donator* to a *target*.
+  Opal._bridge = function(target, donator) {
+    var id, methods, method, i, bridged;
+
+    if (typeof(target) === "function") {
+      id      = donator.$__id__();
+      methods = donator.$instance_methods();
+
+      for (i = methods.length - 1; i >= 0; i--) {
+        method = '$' + methods[i];
+
+        Opal.bridge_method(target, donator, method, donator.$$proto[method]);
+      }
+
+      if (!bridges[id]) {
+        bridges[id] = [];
+      }
+
+      bridges[id].push(target);
+    }
+    else {
+      bridged = bridges[target.$__id__()];
+
+      if (bridged) {
+        for (i = bridged.length - 1; i >= 0; i--) {
+          Opal._bridge(bridged[i], donator);
+        }
+
+        bridges[donator.$__id__()] = bridged.slice();
+      }
+    }
+  };
+
+  // The actual inclusion of a module into a class.
+  //
+  // ## Class `$$parent` and `iclass`
+  //
+  // To handle `super` calls, every class has a `$$parent`. This parent is
+  // used to resolve the next class for a super call. A normal class would
+  // have this point to its superclass. However, if a class includes a module
+  // then this would need to take into account the module. The module would
+  // also have to then point its `$$parent` to the actual superclass. We
+  // cannot modify modules like this, because it might be included in more
+  // then one class. To fix this, we actually insert an `iclass` as the class'
+  // `$$parent` which can then point to the superclass. The `iclass` acts as
+  // a proxy to the actual module, so the `super` chain can then search it for
+  // the required method.
+  //
+  // @param module [Module] the module to include
+  // @param klass  [Class] the target class to include module into
+  // @return [null]
+  Opal.append_features = function(module, klass) {
+    var iclass, donator, prototype, methods, id, i;
+
+    // check if this module is already included in the class
+    for (i = klass.$$inc.length - 1; i >= 0; i--) {
+      if (klass.$$inc[i] === module) {
+        return;
+      }
+    }
+
+    klass.$$inc.push(module);
+    module.$$dep.push(klass);
+    Opal._bridge(klass, module);
+
+    // iclass
+    iclass = {
+      $$name:   module.$$name,
+      $$proto:  module.$$proto,
+      $$parent: klass.$$parent,
+      $$module: module,
+      $$iclass: true
+    };
+
+    klass.$$parent = iclass;
+
+    donator   = module.$$proto;
+    prototype = klass.$$proto;
+    methods   = module.$instance_methods();
+
+    for (i = methods.length - 1; i >= 0; i--) {
+      id = '$' + methods[i];
+
+      // if the target class already has a method of the same name defined
+      // and that method was NOT donated, then it must be a method defined
+      // by the class so we do not want to override it
+      if ( prototype.hasOwnProperty(id) &&
+          !prototype[id].$$donated &&
+          !prototype[id].$$stub) {
+        continue;
+      }
+
+      prototype[id] = donator[id];
+      prototype[id].$$donated = module;
+    }
+
+    Opal.donate_constants(module, klass);
+  };
+
+  // Table that holds all methods that have been defined on all objects
+  // It is used for defining method stubs for new coming native classes
+  Opal.stubs = {};
+
+  // For performance, some core Ruby classes are toll-free bridged to their
+  // native JavaScript counterparts (e.g. a Ruby Array is a JavaScript Array).
+  //
+  // This method is used to setup a native constructor (e.g. Array), to have
+  // its prototype act like a normal Ruby class. Firstly, a new Ruby class is
+  // created using the native constructor so that its prototype is set as the
+  // target for th new class. Note: all bridged classes are set to inherit
+  // from Object.
+  //
+  // Example:
+  //
+  //    Opal.bridge(self, Function);
+  //
+  // @param klass       [Class] the Ruby class to bridge
+  // @param constructor [JS.Function] native JavaScript constructor to use
+  // @return [Class] returns the passed Ruby class
+  //
+  Opal.bridge = function(klass, constructor) {
+    if (constructor.$$bridge) {
+      throw Opal.ArgumentError.$new("already bridged");
+    }
+
+    Opal.stub_subscribers.push(constructor.prototype);
+
+    // Populate constructor with previously stored stubs
+    for (var method_name in Opal.stubs) {
+      if (!(method_name in constructor.prototype)) {
+        constructor.prototype[method_name] = Opal.stub_for(method_name);
+      }
+    }
+
+    constructor.prototype.$$class = klass;
+    constructor.$$bridge          = klass;
+
+    var ancestors = klass.$ancestors();
+
+    // order important here, we have to bridge from the last ancestor to the
+    // bridged class
+    for (var i = ancestors.length - 1; i >= 0; i--) {
+      Opal._bridge(constructor, ancestors[i]);
+    }
+
+    for (var name in BasicObject_alloc.prototype) {
+      var method = BasicObject_alloc.prototype[method];
+
+      if (method && method.$$stub && !(name in constructor.prototype)) {
+        constructor.prototype[name] = method;
+      }
+    }
+
+    return klass;
+  };
+
   // When a source module is included into the target module, we must also copy
   // its constants to the target.
   //
-  function donate_constants(source_mod, target_mod) {
+  Opal.donate_constants = function(source_mod, target_mod) {
     var source_constants = source_mod.$$scope.constants,
         target_scope     = target_mod.$$scope,
         target_constants = target_scope.constants;
@@ -771,7 +837,7 @@
   };
 
   // Donate methods for a module.
-  function donate(module, jsid) {
+  Opal.donate = function(module, jsid) {
     var included_in = module.$$dep,
         body = module.$$proto[jsid],
         i, length, includee, dest, current,
@@ -817,10 +883,43 @@
       }
 
       if (includee.$$dep) {
-        donate(includee, jsid);
+        Opal.donate(includee, jsid);
       }
     }
   };
+
+  // The Array of ancestors for a given module/class
+  Opal.ancestors = function(module_or_class) {
+    var parent = module_or_class,
+        result = [],
+        modules;
+
+    while (parent) {
+      result.push(parent);
+      for (var i=0; i < parent.$$inc.length; i++) {
+        modules = Opal.ancestors(parent.$$inc[i]);
+
+        for(var j = 0; j < modules.length; j++) {
+          result.push(modules[j]);
+        }
+      }
+
+      // only the actual singleton class gets included in its ancestry
+      // after that, traverse the normal class hierarchy
+      if (parent.$$is_singleton && parent.$$singleton_of.$$is_module) {
+        parent = parent.$$singleton_of.$$super;
+      }
+      else {
+        parent = parent.$$is_class ? parent.$$super : null;
+      }
+    }
+
+    return result;
+  };
+
+
+  // Method Missing
+  // --------------
 
   // Methods stubs are used to facilitate method_missing in opal. A stub is a
   // placeholder function which just calls `method_missing` on the receiver.
@@ -847,8 +946,8 @@
   // that other internal methods can detect if a method is just a stub or not.
   // `Kernel#respond_to?` uses this property to detect a methods presence.
   //
-  // @param [Array] stubs an array of method stubs to add
-  //
+  // @param stubs [Array] an array of method stubs to add
+  // @return [undefined]
   Opal.add_stubs = function(stubs) {
     var subscriber, subscribers = Opal.stub_subscribers,
         i, ilength = stubs.length,
@@ -857,7 +956,9 @@
 
     for (i = 0; i < ilength; i++) {
       method_name = stubs[i];
-      stub = stub_for(method_name);
+      // Save method name to populate other subscribers with this stub
+      Opal.stubs[method_name] = true;
+      stub = Opal.stub_for(method_name);
 
       for (j = 0; j < jlength; j++) {
         subscriber = subscribers[j];
@@ -878,19 +979,19 @@
   // Add a method_missing stub function to the given prototype for the
   // given name.
   //
-  // @param [Prototype] prototype the target prototype
-  // @param [String] stub stub name to add (e.g. "$foo")
-  //
+  // @param prototype [Prototype] the target prototype
+  // @param stub [String] stub name to add (e.g. "$foo")
+  // @return [undefined]
   Opal.add_stub_for = function(prototype, stub) {
-    var method_missing_stub = stub_for(stub);
+    var method_missing_stub = Opal.stub_for(stub);
     prototype[stub] = method_missing_stub;
-  }
+  };
 
   // Generate the method_missing stub for a given method name.
   //
-  // @param [String] method_name The js-name of the method to stub (e.g. "$foo")
-  //
-  function stub_for(method_name) {
+  // @param method_name [String] The js-name of the method to stub (e.g. "$foo")
+  // @return [undefined]
+  Opal.stub_for = function(method_name) {
     function method_missing_stub() {
       // Copy any given block onto the method_missing dispatcher
       this.$method_missing.$$p = method_missing_stub.$$p;
@@ -899,15 +1000,28 @@
       method_missing_stub.$$p = null;
 
       // call method missing with correct args (remove '$' prefix on method name)
-      return this.$method_missing.apply(this, [method_name.slice(1)].concat($slice.call(arguments)));
+      var args_ary = new Array(arguments.length);
+      for(var i = 0, l = args_ary.length; i < l; i++) { args_ary[i] = arguments[i]; }
+
+      return this.$method_missing.apply(this, [method_name.slice(1)].concat(args_ary));
     }
 
     method_missing_stub.$$stub = true;
 
     return method_missing_stub;
-  }
+  };
 
-  // Arity count error dispatcher
+
+  // Methods
+  // -------
+
+  // Arity count error dispatcher for methods
+  //
+  // @param actual [Fixnum] number of arguments given to method
+  // @param expected [Fixnum] expected number of arguments
+  // @param object [Object] owner of the method +meth+
+  // @param meth [String] method name that got wrong number of arguments
+  // @raise [ArgumentError]
   Opal.ac = function(actual, expected, object, meth) {
     var inspect = '';
     if (object.$$is_class || object.$$is_module) {
@@ -921,25 +1035,20 @@
     throw Opal.ArgumentError.$new('[' + inspect + '] wrong number of arguments(' + actual + ' for ' + expected + ')');
   };
 
-  // The Array of ancestors for a given module/class
-  Opal.ancestors = function(module_or_class) {
-    var parent = module_or_class,
-        result = [];
+  // Arity count error dispatcher for blocks
+  //
+  // @param actual [Fixnum] number of arguments given to block
+  // @param expected [Fixnum] expected number of arguments
+  // @param context [Object] context of the block definition
+  // @raise [ArgumentError]
+  Opal.block_ac = function(actual, expected, context) {
+    var inspect = "`block in " + context + "'";
 
-    while (parent) {
-      result.push(parent);
-      for (var i=0; i < parent.$$inc.length; i++) {
-        result = result.concat(Opal.ancestors(parent.$$inc[i]));
-      }
-
-      parent = parent.$$is_class ? parent.$$super : null;
-    }
-
-    return result;
+    throw Opal.ArgumentError.$new(inspect + ': wrong number of arguments (' + actual + ' for ' + expected + ')');
   }
 
   // Super dispatcher
-  Opal.find_super_dispatcher = function(obj, jsid, current_func, iter, defs) {
+  Opal.find_super_dispatcher = function(obj, jsid, current_func, defcheck, defs) {
     var dispatcher;
 
     if (defs) {
@@ -951,51 +1060,86 @@
       }
     }
     else {
-      if (obj.$$is_class || obj.$$is_module) {
-        dispatcher = obj.$$super;
-      }
-      else {
-        dispatcher = find_obj_super_dispatcher(obj, jsid, current_func);
-      }
+      dispatcher = Opal.find_obj_super_dispatcher(obj, jsid, current_func);
     }
 
     dispatcher = dispatcher['$' + jsid];
-    dispatcher.$$p = iter;
+
+    if (!defcheck && dispatcher.$$stub && Opal.Kernel.$method_missing === obj.$method_missing) {
+      // method_missing hasn't been explicitly defined
+      throw Opal.NoMethodError.$new('super: no superclass method `'+jsid+"' for "+obj, jsid);
+    }
 
     return dispatcher;
   };
 
   // Iter dispatcher for super in a block
-  Opal.find_iter_super_dispatcher = function(obj, jsid, current_func, iter, defs) {
+  Opal.find_iter_super_dispatcher = function(obj, jsid, current_func, defcheck, implicit) {
+    var call_jsid = jsid;
+
+    if (!current_func) {
+      throw Opal.RuntimeError.$new("super called outside of method");
+    }
+
+    if (implicit && current_func.$$define_meth) {
+      throw Opal.RuntimeError.$new("implicit argument passing of super from method defined by define_method() is not supported. Specify all arguments explicitly");
+    }
+
     if (current_func.$$def) {
-      return Opal.find_super_dispatcher(obj, current_func.$$jsid, current_func, iter, defs);
+      call_jsid = current_func.$$jsid;
     }
-    else {
-      return Opal.find_super_dispatcher(obj, jsid, current_func, iter, defs);
-    }
+
+    return Opal.find_super_dispatcher(obj, call_jsid, current_func, defcheck);
   };
 
-  function find_obj_super_dispatcher(obj, jsid, current_func) {
+  Opal.find_obj_super_dispatcher = function(obj, jsid, current_func) {
     var klass = obj.$$meta || obj.$$class;
+
+    // first we need to find the class/module current_func is located on
+    klass = Opal.find_owning_class(klass, current_func);
+
+    if (!klass) {
+      throw new Error("could not find current class for super()");
+    }
+
     jsid = '$' + jsid;
+    return Opal.find_super_func(klass, jsid, current_func);
+  };
+
+  Opal.find_owning_class = function(klass, current_func) {
+    var owner = current_func.$$owner;
 
     while (klass) {
-      if (klass.$$proto[jsid] === current_func) {
-        // ok
+      // repeating for readability
+
+      if (klass.$$iclass && klass.$$module === current_func.$$donated) {
+        // this klass was the last one the module donated to
+        // case is also hit with multiple module includes
+        break;
+      }
+      else if (klass.$$iclass && klass.$$module === owner) {
+        // module has donated to other classes but klass isn't one of those
+        break;
+      }
+      else if (owner.$$is_singleton && klass === owner.$$singleton_of.$$class) {
+        // cases like stdlib `Singleton::included` that use a singleton of a singleton
+        break;
+      }
+      else if (klass === owner) {
+        // no modules, pure class inheritance
         break;
       }
 
       klass = klass.$$parent;
     }
 
-    // if we arent in a class, we couldnt find current?
-    if (!klass) {
-      throw new Error("could not find current class for super()");
-    }
+    return klass;
+  };
 
-    klass = klass.$$parent;
+  Opal.find_super_func = function(owning_klass, jsid, current_func) {
+    var klass = owning_klass.$$parent;
 
-    // else, let's find the next one
+    // now we can find the super
     while (klass) {
       var working = klass.$$proto[jsid];
 
@@ -1022,13 +1166,32 @@
     throw Opal.returner;
   };
 
+  // Used to break out of a block.
+  Opal.brk = function(val, breaker) {
+    breaker.$v = val;
+    throw breaker;
+  };
+
+  // Builds a new unique breaker, this is to avoid multiple nested breaks to get
+  // in the way of each other.
+  Opal.new_brk = function() {
+    return new Error('unexpected break');
+  };
+
   // handles yield calls for 1 yielded arg
   Opal.yield1 = function(block, arg) {
     if (typeof(block) !== "function") {
       throw Opal.LocalJumpError.$new("no block given");
     }
 
-    if (block.length > 1 && arg.$$is_array) {
+    var has_mlhs = block.$$has_top_level_mlhs_arg,
+        has_trailing_comma = block.$$has_trailing_comma_in_args;
+
+    if (block.length > 1 || ((has_mlhs || has_trailing_comma) && block.length === 1)) {
+      arg = Opal.to_ary(arg);
+    }
+
+    if ((block.length > 1 || (has_trailing_comma && block.length === 1)) && arg.$$is_array) {
       return block.apply(null, arg);
     }
     else {
@@ -1049,7 +1212,10 @@
     }
 
     if (!args.$$is_array) {
-      args = $slice.call(args);
+      var args_ary = new Array(args.length);
+      for(var i = 0, l = args_ary.length; i < l; i++) { args_ary[i] = args[i]; }
+
+      return block.apply(null, args_ary);
     }
 
     return block.apply(null, args);
@@ -1081,34 +1247,55 @@
       return true;
     }
 
-    var search = object.$$class;
+    var i, length, ancestors = Opal.ancestors(object.$$class);
 
-    while (search) {
-      if (search === klass) {
+    for (i = 0, length = ancestors.length; i < length; i++) {
+      if (ancestors[i] === klass) {
         return true;
       }
+    }
 
-      for (var i = 0, length = search.$$inc.length; i < length; i++) {
-        if (search.$$inc[i] === klass) {
-          return true;
-        }
+    ancestors = Opal.ancestors(object.$$meta);
+
+    for (i = 0, length = ancestors.length; i < length; i++) {
+      if (ancestors[i] === klass) {
+        return true;
       }
-
-      search = search.$$super;
     }
 
     return false;
   };
 
+  // Helpers for extracting kwsplats
+  // Used for: { **h }
+  Opal.to_hash = function(value) {
+    if (value.$$is_hash) {
+      return value;
+    }
+    else if (value['$respond_to?']('to_hash', true)) {
+      var hash = value.$to_hash();
+      if (hash.$$is_hash) {
+        return hash;
+      }
+      else {
+        throw Opal.TypeError.$new("Can't convert " + value.$$class +
+          " to Hash (" + value.$$class + "#to_hash gives " + hash.$$class + ")");
+      }
+    }
+    else {
+      throw Opal.TypeError.$new("no implicit conversion of " + value.$$class + " into Hash");
+    }
+  };
+
   // Helpers for implementing multiple assignment
   // Our code for extracting the values and assigning them only works if the
-  // return value is a JS array
+  // return value is a JS array.
   // So if we get an Array subclass, extract the wrapped JS array from it
 
+  // Used for: a, b = something (no splat)
   Opal.to_ary = function(value) {
-    // Used for: a, b = something (no splat)
     if (value.$$is_array) {
-      return (value.constructor === Array) ? value : value.literal;
+      return value;
     }
     else if (value['$respond_to?']('to_ary', true)) {
       var ary = value.$to_ary();
@@ -1116,7 +1303,7 @@
         return [value];
       }
       else if (ary.$$is_array) {
-        return (ary.constructor === Array) ? ary : ary.literal;
+        return ary;
       }
       else {
         throw Opal.TypeError.$new("Can't convert " + value.$$class +
@@ -1128,11 +1315,11 @@
     }
   };
 
+  // Used for: a, b = *something (with splat)
   Opal.to_a = function(value) {
-    // Used for: a, b = *something (with splat)
     if (value.$$is_array) {
       // A splatted array must be copied
-      return (value.constructor === Array) ? value.slice() : value.literal.slice();
+      return value.slice();
     }
     else if (value['$respond_to?']('to_a', true)) {
       var ary = value.$to_a();
@@ -1140,7 +1327,7 @@
         return [value];
       }
       else if (ary.$$is_array) {
-        return (ary.constructor === Array) ? ary : ary.literal;
+        return ary;
       }
       else {
         throw Opal.TypeError.$new("Can't convert " + value.$$class +
@@ -1151,6 +1338,24 @@
       return [value];
     }
   };
+
+  // Used for extracting keyword arguments from arguments passed to
+  // JS function. If provided +arguments+ list doesn't have a Hash
+  // as a last item, returns a blank Hash.
+  //
+  // @param parameters [Array]
+  // @return [Hash]
+  //
+  Opal.extract_kwargs = function(parameters) {
+    var kwargs = parameters[parameters.length - 1];
+    if (kwargs != null && kwargs['$respond_to?']('to_hash', true)) {
+      Array.prototype.splice.call(parameters, parameters.length - 1, 1);
+      return kwargs.$to_hash();
+    }
+    else {
+      return Opal.hash2([], {});
+    }
+  }
 
   // Used to get a list of rest keyword arguments. Method takes the given
   // keyword args, i.e. the hash literal passed to the method containing all
@@ -1181,6 +1386,7 @@
 
   // Call a ruby method on a ruby object with some arguments:
   //
+  // @example
   //   var my_array = [1, 2, 3, 4]
   //   Opal.send(my_array, 'length')     # => 4
   //   Opal.send(my_array, 'reverse!')   # => [4, 3, 2, 1]
@@ -1190,30 +1396,34 @@
   //
   // The result of either call with be returned.
   //
-  // @param [Object] recv the ruby object
-  // @param [String] mid ruby method to call
-  //
+  // @param recv [Object] the ruby object
+  // @param mid  [String] ruby method to call
+  // @return [Object] forwards the return value of the method (or of method_missing)
   Opal.send = function(recv, mid) {
-    var args = $slice.call(arguments, 2),
-        func = recv['$' + mid];
+    var args_ary = new Array(Math.max(arguments.length - 2, 0));
+    for(var i = 0, l = args_ary.length; i < l; i++) { args_ary[i] = arguments[i + 2]; }
+
+    var func = recv['$' + mid];
 
     if (func) {
-      return func.apply(recv, args);
+      return func.apply(recv, args_ary);
     }
 
-    return recv.$method_missing.apply(recv, [mid].concat(args));
+    return recv.$method_missing.apply(recv, [mid].concat(args_ary));
   };
 
   Opal.block_send = function(recv, mid, block) {
-    var args = $slice.call(arguments, 3),
-        func = recv['$' + mid];
+    var args_ary = new Array(Math.max(arguments.length - 3, 0));
+    for(var i = 0, l = args_ary.length; i < l; i++) { args_ary[i] = arguments[i + 3]; }
+
+    var func = recv['$' + mid];
 
     if (func) {
       func.$$p = block;
-      return func.apply(recv, args);
+      return func.apply(recv, args_ary);
     }
 
-    return recv.$method_missing.apply(recv, [mid].concat(args));
+    return recv.$method_missing.apply(recv, [mid].concat(args_ary));
   };
 
   // Used to define methods on an object. This is a helper method, used by the
@@ -1247,16 +1457,18 @@
   // defined on the object as a singleton method. This would be the case when
   // a method is defined inside an `instance_eval` block.
   //
-  // @param [RubyObject or Class] obj the actual obj to define method for
-  // @param [String] jsid the javascript friendly method name (e.g. '$foo')
-  // @param [Function] body the literal javascript function used as method
+  // @param obj  [Object, Class] the actual obj to define method for
+  // @param jsid [String] the JavaScript friendly method name (e.g. '$foo')
+  // @param body [JS.Function] the literal JavaScript function used as method
   // @return [null]
   //
   Opal.defn = function(obj, jsid, body) {
     obj.$$proto[jsid] = body;
+    // for super dispatcher, etc.
+    body.$$owner = obj;
 
     if (obj.$$is_module) {
-      donate(obj, jsid);
+      Opal.donate(obj, jsid);
 
       if (obj.$$module_function) {
         Opal.defs(obj, jsid, body);
@@ -1268,23 +1480,21 @@
 
       if (bridged) {
         for (var i = bridged.length - 1; i >= 0; i--) {
-          bridge_method(bridged[i], obj, jsid, body);
+          Opal.bridge_method(bridged[i], obj, jsid, body);
         }
       }
     }
 
-    if (obj.$method_added && !obj.$method_added.$$stub) {
+    var singleton_of = obj.$$singleton_of;
+    if (obj.$method_added && !obj.$method_added.$$stub && !singleton_of) {
       obj.$method_added(jsid.substr(1));
     }
-
-    var singleton_of = obj.$$singleton_of;
-    if (singleton_of && singleton_of.$singleton_method_added && !singleton_of.$singleton_method_added.$$stub) {
+    else if (singleton_of && singleton_of.$singleton_method_added && !singleton_of.$singleton_method_added.$$stub) {
       singleton_of.$singleton_method_added(jsid.substr(1));
     }
 
     return nil;
   };
-
 
   // Define a singleton method on the given object.
   Opal.defs = function(obj, jsid, body) {
@@ -1384,15 +1594,19 @@
     return obj;
   };
 
+
+  // Hashes
+  // ------
+
   Opal.hash_init = function(hash) {
-    hash.$$map  = {};
     hash.$$smap = {};
+    hash.$$map  = {};
     hash.$$keys = [];
   };
 
   Opal.hash_clone = function(from_hash, to_hash) {
-    to_hash.none = from_hash.none;
-    to_hash.proc = from_hash.proc;
+    to_hash.$$none = from_hash.$$none;
+    to_hash.$$proc = from_hash.$$proc;
 
     for (var i = 0, keys = from_hash.$$keys, length = keys.length, key, value; i < length; i++) {
       key = from_hash.$$keys[i];
@@ -1650,9 +1864,9 @@
   Opal.hash2 = function(keys, smap) {
     var hash = new Opal.Hash.$$alloc();
 
+    hash.$$smap = smap;
     hash.$$map  = {};
     hash.$$keys = keys;
-    hash.$$smap = smap;
 
     return hash;
   };
@@ -1690,6 +1904,7 @@
     return name;
   };
 
+
   // Require system
   // --------------
 
@@ -1698,7 +1913,7 @@
   Opal.current_dir     = '.'
   Opal.require_table   = {'corelib/runtime': true};
 
-  function normalize(path) {
+  Opal.normalize = function(path) {
     var parts, part, new_parts = [], SEPARATOR = '/';
 
     if (Opal.current_dir !== '.') {
@@ -1715,13 +1930,13 @@
     }
 
     return new_parts.join(SEPARATOR);
-  }
+  };
 
   Opal.loaded = function(paths) {
     var i, l, path;
 
     for (i = 0, l = paths.length; i < l; i++) {
-      path = normalize(paths[i]);
+      path = Opal.normalize(paths[i]);
 
       if (Opal.require_table[path]) {
         return;
@@ -1730,10 +1945,10 @@
       Opal.loaded_features.push(path);
       Opal.require_table[path] = true;
     }
-  }
+  };
 
   Opal.load = function(path) {
-    path = normalize(path);
+    path = Opal.normalize(path);
 
     Opal.loaded([path]);
 
@@ -1743,7 +1958,7 @@
       module(Opal);
     }
     else {
-      var severity = Opal.dynamic_require_severity || 'warning';
+      var severity = Opal.config.missing_require_severity;
       var message  = 'cannot load such file -- ' + path;
 
       if (severity === "error") {
@@ -1755,32 +1970,38 @@
     }
 
     return true;
-  }
+  };
 
   Opal.require = function(path) {
-    path = normalize(path);
+    path = Opal.normalize(path);
 
     if (Opal.require_table[path]) {
       return false;
     }
 
     return Opal.load(path);
-  }
+  };
+
 
   // Initialization
   // --------------
 
   // Constructors for *instances* of core objects
-  boot_class_alloc('BasicObject', BasicObject_alloc);
-  boot_class_alloc('Object',      Object_alloc,       BasicObject_alloc);
-  boot_class_alloc('Module',      Module_alloc,       Object_alloc);
-  boot_class_alloc('Class',       Class_alloc,        Module_alloc);
+  Opal.boot_class_alloc('BasicObject', BasicObject_alloc);
+  Opal.boot_class_alloc('Object',      Object_alloc,       BasicObject_alloc);
+  Opal.boot_class_alloc('Module',      Module_alloc,       Object_alloc);
+  Opal.boot_class_alloc('Class',       Class_alloc,        Module_alloc);
 
   // Constructors for *classes* of core objects
-  BasicObject = boot_core_class_object('BasicObject', BasicObject_alloc, Class_alloc);
-  _Object     = boot_core_class_object('Object',      Object_alloc,      BasicObject.constructor);
-  Module      = boot_core_class_object('Module',      Module_alloc,      _Object.constructor);
-  Class       = boot_core_class_object('Class',       Class_alloc,       Module.constructor);
+  Opal.BasicObject = BasicObject = Opal.setup_class_object('BasicObject', BasicObject_alloc, 'Class',       Class_alloc);
+  Opal.Object      = _Object     = Opal.setup_class_object('Object',      Object_alloc,      'BasicObject', BasicObject.constructor);
+  Opal.Module      = Module      = Opal.setup_class_object('Module',      Module_alloc,      'Object',      _Object.constructor);
+  Opal.Class       = Class       = Opal.setup_class_object('Class',       Class_alloc,       'Module',      Module.constructor);
+
+  Opal.constants.push("BasicObject");
+  Opal.constants.push("Object");
+  Opal.constants.push("Module");
+  Opal.constants.push("Class");
 
   // Fix booted classes to use their metaclass
   BasicObject.$$class = Class;
@@ -1808,12 +2029,16 @@
   Class.$$scope       = _Object.$$scope;
   Class.$$orig_scope  = _Object.$$orig_scope;
 
+  // Forward .toString() to #to_s
   _Object.$$proto.toString = function() {
     return this.$to_s();
   };
 
+  // Make Kernel#require immediately available as it's needed to require all the
+  // other corelib files.
   _Object.$$proto.$require = Opal.require;
 
+  // Instantiate the top object
   Opal.top = new _Object.$$alloc();
 
   // Nil
@@ -1821,8 +2046,7 @@
   nil = Opal.nil = new NilClass_alloc();
   nil.$$id = nil_id;
   nil.call = nil.apply = function() { throw Opal.LocalJumpError.$new('no block given'); };
-
-  Opal.breaker  = new Error('unexpected break');
+  Opal.breaker  = new Error('unexpected break (old)');
   Opal.returner = new Error('unexpected return');
 
   TypeError.$$super = Error;
@@ -1838,102 +2062,100 @@ if (typeof(window) !== 'undefined') {
   Opal.global = window;
 }
 ;
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/helpers"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $module = Opal.module;
 
-  Opal.add_stubs(['$new', '$class', '$===', '$respond_to?', '$raise', '$type_error', '$__send__', '$coerce_to', '$nil?', '$<=>', '$inspect', '$coerce_to!']);
+  Opal.add_stubs(['$new', '$class', '$===', '$respond_to?', '$raise', '$type_error', '$__send__', '$coerce_to', '$nil?', '$<=>', '$inspect', '$coerce_to!', '$!=', '$[]', '$upcase']);
   return (function($base) {
     var $Opal, self = $Opal = $module($base, 'Opal');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13;
 
-    Opal.defs(self, '$bridge', function(klass, constructor) {
+    Opal.defs(self, '$bridge', TMP_1 = function ːbridge(klass, constructor) {
       var self = this;
 
       return Opal.bridge(klass, constructor);
-    });
+    }, TMP_1.$$arity = 2);
 
-    Opal.defs(self, '$type_error', function(object, type, method, coerced) {
+    Opal.defs(self, '$type_error', TMP_2 = function ːtype_error(object, type, method, coerced) {
       var $a, $b, self = this;
 
       if (method == null) {
-        method = nil
+        method = nil;
       }
       if (coerced == null) {
-        coerced = nil
+        coerced = nil;
       }
-      if ((($a = (($b = method !== false && method !== nil) ? coerced : method)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = method !== false && method !== nil && method != null) ? coerced : method)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('TypeError').$new("can't convert " + (object.$class()) + " into " + (type) + " (" + (object.$class()) + "#" + (method) + " gives " + (coerced.$class()))
         } else {
         return $scope.get('TypeError').$new("no implicit conversion of " + (object.$class()) + " into " + (type))
       };
-    });
+    }, TMP_2.$$arity = -3);
 
-    Opal.defs(self, '$coerce_to', function(object, type, method) {
+    Opal.defs(self, '$coerce_to', TMP_3 = function ːcoerce_to(object, type, method) {
       var $a, self = this;
 
-      if ((($a = type['$==='](object)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = type['$==='](object)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return object};
-      if ((($a = object['$respond_to?'](method)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = object['$respond_to?'](method)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise(self.$type_error(object, type))
       };
       return object.$__send__(method);
-    });
+    }, TMP_3.$$arity = 3);
 
-    Opal.defs(self, '$coerce_to!', function(object, type, method) {
+    Opal.defs(self, '$coerce_to!', TMP_4 = function(object, type, method) {
       var $a, self = this, coerced = nil;
 
       coerced = self.$coerce_to(object, type, method);
-      if ((($a = type['$==='](coerced)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = type['$==='](coerced)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise(self.$type_error(object, type, method, coerced))
       };
       return coerced;
-    });
+    }, TMP_4.$$arity = 3);
 
-    Opal.defs(self, '$coerce_to?', function(object, type, method) {
+    Opal.defs(self, '$coerce_to?', TMP_5 = function(object, type, method) {
       var $a, self = this, coerced = nil;
 
-      if ((($a = object['$respond_to?'](method)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = object['$respond_to?'](method)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return nil
       };
       coerced = self.$coerce_to(object, type, method);
-      if ((($a = coerced['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = coerced['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return nil};
-      if ((($a = type['$==='](coerced)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = type['$==='](coerced)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise(self.$type_error(object, type, method, coerced))
       };
       return coerced;
-    });
+    }, TMP_5.$$arity = 3);
 
-    Opal.defs(self, '$try_convert', function(object, type, method) {
+    Opal.defs(self, '$try_convert', TMP_6 = function ːtry_convert(object, type, method) {
       var $a, self = this;
 
-      if ((($a = type['$==='](object)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = type['$==='](object)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return object};
-      if ((($a = object['$respond_to?'](method)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = object['$respond_to?'](method)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return object.$__send__(method)
         } else {
         return nil
       };
-    });
+    }, TMP_6.$$arity = 3);
 
-    Opal.defs(self, '$compare', function(a, b) {
+    Opal.defs(self, '$compare', TMP_7 = function ːcompare(a, b) {
       var $a, self = this, compare = nil;
 
       compare = a['$<=>'](b);
-      if ((($a = compare === nil) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = compare === nil) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (a.$class()) + " with " + (b.$class()) + " failed")};
       return compare;
-    });
+    }, TMP_7.$$arity = 2);
 
-    Opal.defs(self, '$destructure', function(args) {
+    Opal.defs(self, '$destructure', TMP_8 = function ːdestructure(args) {
       var self = this;
 
       
@@ -1944,12 +2166,15 @@ Opal.modules["corelib/helpers"] = function(Opal) {
         return args;
       }
       else {
-        return $slice.call(args);
+        var args_ary = new Array(args.length);
+        for(var i = 0, l = args_ary.length; i < l; i++) { args_ary[i] = args[i]; }
+
+        return args_ary;
       }
     
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defs(self, '$respond_to?', function(obj, method) {
+    Opal.defs(self, '$respond_to?', TMP_9 = function(obj, method) {
       var self = this;
 
       
@@ -1958,9 +2183,9 @@ Opal.modules["corelib/helpers"] = function(Opal) {
       }
     
       return obj['$respond_to?'](method);
-    });
+    }, TMP_9.$$arity = 2);
 
-    Opal.defs(self, '$inspect', function(obj) {
+    Opal.defs(self, '$inspect', TMP_10 = function ːinspect(obj) {
       var self = this;
 
       
@@ -1977,77 +2202,96 @@ Opal.modules["corelib/helpers"] = function(Opal) {
         return obj.$inspect();
       }
     
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defs(self, '$instance_variable_name!', function(name) {
+    Opal.defs(self, '$instance_variable_name!', TMP_11 = function(name) {
       var $a, self = this;
 
       name = $scope.get('Opal')['$coerce_to!'](name, $scope.get('String'), "to_str");
-      if ((($a = /^@[a-zA-Z_][a-zA-Z0-9_]*?$/.test(name)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = /^@[a-zA-Z_][a-zA-Z0-9_]*?$/.test(name)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('NameError').$new("'" + (name) + "' is not allowed as an instance variable name", name))
       };
       return name;
-    });
+    }, TMP_11.$$arity = 1);
+
+    Opal.defs(self, '$const_name!', TMP_12 = function(const_name) {
+      var $a, self = this;
+
+      const_name = $scope.get('Opal')['$coerce_to!'](const_name, $scope.get('String'), "to_str");
+      if ((($a = const_name['$[]'](0)['$!='](const_name['$[]'](0).$upcase())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        self.$raise($scope.get('NameError'), "wrong constant name " + (const_name))};
+      return const_name;
+    }, TMP_12.$$arity = 1);
+
+    Opal.defs(self, '$pristine', TMP_13 = function ːpristine(owner_class, $a_rest) {
+      var self = this, method_names;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      method_names = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        method_names[$arg_idx - 1] = arguments[$arg_idx];
+      }
+      
+      var method_name;
+      for (var i = method_names.length - 1; i >= 0; i--) {
+        method_name = method_names[i];
+        owner_class.$$proto['$'+method_name].$$pristine = true
+      }
+    
+      return nil;
+    }, TMP_13.$$arity = -2);
   })($scope.base)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/module"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_lt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs < rhs : lhs['$<'](rhs);
   }
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
-  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
+  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $range = Opal.range, $hash2 = Opal.hash2;
 
-  Opal.add_stubs(['$===', '$raise', '$equal?', '$<', '$>', '$nil?', '$attr_reader', '$attr_writer', '$coerce_to!', '$new', '$=~', '$inject', '$const_get', '$split', '$const_missing', '$to_str', '$to_proc', '$lambda', '$bind', '$call', '$class', '$append_features', '$included', '$name', '$to_s', '$__id__']);
+  Opal.add_stubs(['$===', '$raise', '$equal?', '$<', '$>', '$nil?', '$attr_reader', '$attr_writer', '$coerce_to!', '$new', '$const_name!', '$=~', '$inject', '$const_get', '$split', '$const_missing', '$==', '$!', '$start_with?', '$to_proc', '$lambda', '$bind', '$call', '$class', '$append_features', '$included', '$name', '$cover?', '$size', '$merge', '$compile', '$proc', '$to_s', '$__id__', '$constants', '$include?']);
   return (function($base, $super) {
     function $Module(){};
     var self = $Module = $klass($base, $super, 'Module', $Module);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_3, TMP_5, TMP_6;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_22, TMP_23, TMP_24, TMP_25, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_36, TMP_37, TMP_38, TMP_39, TMP_41, TMP_42, TMP_43, TMP_44, TMP_45, TMP_46, TMP_47, TMP_48, TMP_49;
 
-    Opal.defs(self, '$new', TMP_1 = function() {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil;
+    Opal.defs(self, '$allocate', TMP_1 = function ːallocate() {
+      var self = this;
 
-      TMP_1.$$p = null;
       
-      var klass         = Opal.boot_module_object();
-      klass.$$name      = nil;
-      klass.$$class     = Opal.Module;
-      klass.$$dep       = []
-      klass.$$is_module = true;
-      klass.$$proto     = {};
+      var module;
 
-      // inherit scope from parent
-      Opal.create_scope(Opal.Module.$$scope, klass);
-
-      if (block !== nil) {
-        var block_self = block.$$s;
-        block.$$s = null;
-        block.call(klass);
-        block.$$s = block_self;
-      }
-
-      return klass;
+      module = Opal.module_allocate();
+      Opal.create_scope(Opal.Module.$$scope, module, null);
+      return module;
     
-    });
+    }, TMP_1.$$arity = 0);
 
-    Opal.defn(self, '$===', function(object) {
+    Opal.defn(self, '$initialize', TMP_2 = function ːinitialize() {
+      var self = this, $iter = TMP_2.$$p, block = $iter || nil;
+
+      TMP_2.$$p = null;
+      return Opal.module_initialize(self, block);
+    }, TMP_2.$$arity = 0);
+
+    Opal.defn(self, '$===', TMP_3 = function(object) {
       var $a, self = this;
 
-      if ((($a = object == null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = object == null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return false};
       return Opal.is_a(object, self);
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$<', function(other) {
+    Opal.defn(self, '$<', TMP_4 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Module')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Module')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "compared with non class/module")
       };
@@ -2074,31 +2318,31 @@ Opal.modules["corelib/module"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$<=', function(other) {
+    Opal.defn(self, '$<=', TMP_5 = function(other) {
       var $a, self = this;
 
-      return ((($a = self['$equal?'](other)) !== false && $a !== nil) ? $a : $rb_lt(self, other));
-    });
+      return ((($a = self['$equal?'](other)) !== false && $a !== nil && $a != null) ? $a : $rb_lt(self, other));
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$>', function(other) {
+    Opal.defn(self, '$>', TMP_6 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Module')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Module')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "compared with non class/module")
       };
       return $rb_lt(other, self);
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$>=', function(other) {
+    Opal.defn(self, '$>=', TMP_7 = function(other) {
       var $a, self = this;
 
-      return ((($a = self['$equal?'](other)) !== false && $a !== nil) ? $a : $rb_gt(self, other));
-    });
+      return ((($a = self['$equal?'](other)) !== false && $a !== nil && $a != null) ? $a : $rb_gt(self, other));
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_8 = function(other) {
       var $a, self = this, lt = nil;
 
       
@@ -2106,73 +2350,73 @@ Opal.modules["corelib/module"] = function(Opal) {
         return 0;
       }
     
-      if ((($a = $scope.get('Module')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Module')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return nil
       };
       lt = $rb_lt(self, other);
-      if ((($a = lt['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = lt['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return nil};
-      if (lt !== false && lt !== nil) {
+      if (lt !== false && lt !== nil && lt != null) {
         return -1
         } else {
         return 1
       };
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$alias_method', function(newname, oldname) {
+    Opal.defn(self, '$alias_method', TMP_9 = function ːalias_method(newname, oldname) {
       var self = this;
 
       Opal.alias(self, newname, oldname);
       return self;
-    });
+    }, TMP_9.$$arity = 2);
 
-    Opal.defn(self, '$alias_native', function(mid, jsid) {
+    Opal.defn(self, '$alias_native', TMP_10 = function ːalias_native(mid, jsid) {
       var self = this;
 
       if (jsid == null) {
-        jsid = mid
+        jsid = mid;
       }
       Opal.alias_native(self, mid, jsid);
       return self;
-    });
+    }, TMP_10.$$arity = -2);
 
-    Opal.defn(self, '$ancestors', function() {
+    Opal.defn(self, '$ancestors', TMP_11 = function ːancestors() {
       var self = this;
 
       return Opal.ancestors(self);
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$append_features', function(klass) {
+    Opal.defn(self, '$append_features', TMP_12 = function ːappend_features(klass) {
       var self = this;
 
       Opal.append_features(self, klass);
       return self;
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$attr_accessor', function() {
-      var $a, $b, self = this, $splat_index = nil;
+    Opal.defn(self, '$attr_accessor', TMP_13 = function ːattr_accessor($a_rest) {
+      var $b, $c, self = this, names;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var names = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        names[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      names = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        names[$arg_idx - 0] = arguments[$arg_idx];
       }
-      ($a = self).$attr_reader.apply($a, Opal.to_a(names));
-      return ($b = self).$attr_writer.apply($b, Opal.to_a(names));
-    });
+      ($b = self).$attr_reader.apply($b, Opal.to_a(names));
+      return ($c = self).$attr_writer.apply($c, Opal.to_a(names));
+    }, TMP_13.$$arity = -1);
 
     Opal.alias(self, 'attr', 'attr_accessor');
 
-    Opal.defn(self, '$attr_reader', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$attr_reader', TMP_14 = function ːattr_reader($a_rest) {
+      var self = this, names;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var names = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        names[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      names = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        names[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var proto = self.$$proto;
@@ -2198,6 +2442,9 @@ Opal.modules["corelib/module"] = function(Opal) {
         // initialize the instance variable as nil
         proto[ivar] = nil;
 
+        body.$$parameters = [];
+        body.$$arity = 0;
+
         if (self.$$is_singleton) {
           proto.constructor.prototype[id] = body;
         }
@@ -2207,16 +2454,16 @@ Opal.modules["corelib/module"] = function(Opal) {
       }
     
       return nil;
-    });
+    }, TMP_14.$$arity = -1);
 
-    Opal.defn(self, '$attr_writer', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$attr_writer', TMP_15 = function ːattr_writer($a_rest) {
+      var self = this, names;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var names = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        names[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      names = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        names[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var proto = self.$$proto;
@@ -2234,6 +2481,9 @@ Opal.modules["corelib/module"] = function(Opal) {
           }
         })(ivar);
 
+        body.$$parameters = [['req']];
+        body.$$arity = 1;
+
         // initialize the instance variable as nil
         proto[ivar] = nil;
 
@@ -2246,9 +2496,9 @@ Opal.modules["corelib/module"] = function(Opal) {
       }
     
       return nil;
-    });
+    }, TMP_15.$$arity = -1);
 
-    Opal.defn(self, '$autoload', function(const$, path) {
+    Opal.defn(self, '$autoload', TMP_16 = function ːautoload(const$, path) {
       var self = this;
 
       
@@ -2261,50 +2511,51 @@ Opal.modules["corelib/module"] = function(Opal) {
       autoloaders[const$] = path;
       return nil;
     ;
-    });
+    }, TMP_16.$$arity = 2);
 
-    Opal.defn(self, '$class_variable_get', function(name) {
+    Opal.defn(self, '$class_variable_get', TMP_17 = function ːclass_variable_get(name) {
       var $a, self = this;
 
       name = $scope.get('Opal')['$coerce_to!'](name, $scope.get('String'), "to_str");
-      if ((($a = name.length < 3 || name.slice(0,2) !== '@@') !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = name.length < 3 || name.slice(0,2) !== '@@') !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('NameError').$new("class vars should start with @@", name))};
       
       var value = Opal.cvars[name.slice(2)];
-      (function() {if ((($a = value == null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      (function() {if ((($a = value == null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('NameError').$new("uninitialized class variable @@a in", name))
         } else {
         return nil
       }; return nil; })()
       return value;
     
-    });
+    }, TMP_17.$$arity = 1);
 
-    Opal.defn(self, '$class_variable_set', function(name, value) {
+    Opal.defn(self, '$class_variable_set', TMP_18 = function ːclass_variable_set(name, value) {
       var $a, self = this;
 
       name = $scope.get('Opal')['$coerce_to!'](name, $scope.get('String'), "to_str");
-      if ((($a = name.length < 3 || name.slice(0,2) !== '@@') !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = name.length < 3 || name.slice(0,2) !== '@@') !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('NameError'))};
       
       Opal.cvars[name.slice(2)] = value;
       return value;
     
-    });
+    }, TMP_18.$$arity = 2);
 
-    Opal.defn(self, '$constants', function() {
+    Opal.defn(self, '$constants', TMP_19 = function ːconstants() {
       var self = this;
 
       return self.$$scope.constants.slice(0);
-    });
+    }, TMP_19.$$arity = 0);
 
-    Opal.defn(self, '$const_defined?', function(name, inherit) {
+    Opal.defn(self, '$const_defined?', TMP_20 = function(name, inherit) {
       var $a, self = this;
 
       if (inherit == null) {
-        inherit = true
+        inherit = true;
       }
-      if ((($a = name['$=~'](/^[A-Z]\w*$/)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      name = $scope.get('Opal')['$const_name!'](name);
+      if ((($a = name['$=~']((($scope.get('Opal')).$$scope.get('CONST_NAME_REGEXP')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('NameError').$new("wrong constant name " + (name), name))
       };
@@ -2329,19 +2580,25 @@ Opal.modules["corelib/module"] = function(Opal) {
 
       return false;
     
-    });
+    }, TMP_20.$$arity = -2);
 
-    Opal.defn(self, '$const_get', function(name, inherit) {
-      var $a, $b, TMP_2, self = this;
+    Opal.defn(self, '$const_get', TMP_22 = function ːconst_get(name, inherit) {
+      var $a, $b, TMP_21, self = this;
 
       if (inherit == null) {
-        inherit = true
+        inherit = true;
       }
-      if ((($a = name.indexOf('::') != -1 && name != '::') !== nil && (!$a.$$is_boolean || $a == true))) {
-        return ($a = ($b = name.$split("::")).$inject, $a.$$p = (TMP_2 = function(o, c){var self = TMP_2.$$s || this;
+      name = $scope.get('Opal')['$const_name!'](name);
+      
+      if (name.indexOf('::') === 0 && name !== '::'){
+        name = name.slice(2);
+      }
+    
+      if ((($a = name.indexOf('::') != -1 && name != '::') !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        return ($a = ($b = name.$split("::")).$inject, $a.$$p = (TMP_21 = function(o, c){var self = TMP_21.$$s || this;
 if (o == null) o = nil;if (c == null) c = nil;
-        return o.$const_get(c)}, TMP_2.$$s = self, TMP_2), $a).call($b, self)};
-      if ((($a = /^[A-Z]\w*$/.test(name)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        return o.$const_get(c)}, TMP_21.$$s = self, TMP_21.$$arity = 2, TMP_21), $a).call($b, self)};
+      if ((($a = name['$=~']((($scope.get('Opal')).$$scope.get('CONST_NAME_REGEXP')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('NameError').$new("wrong constant name " + (name), name))
       };
@@ -2366,10 +2623,10 @@ if (o == null) o = nil;if (c == null) c = nil;
 
       return self.$const_missing(name);
     
-    });
+    }, TMP_22.$$arity = -2);
 
-    Opal.defn(self, '$const_missing', function(name) {
-      var self = this;
+    Opal.defn(self, '$const_missing', TMP_23 = function ːconst_missing(name) {
+      var self = this, full_const_name = nil;
 
       
       if (self.$$autoload) {
@@ -2382,61 +2639,62 @@ if (o == null) o = nil;if (c == null) c = nil;
         }
       }
     
-      return self.$raise($scope.get('NameError').$new("uninitialized constant " + (self) + "::" + (name), name));
-    });
-
-    Opal.defn(self, '$const_set', function(name, value) {
-      var $a, self = this;
-
-      if ((($a = name['$=~'](/^[A-Z]\w*$/)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      full_const_name = (function() {if (self['$==']($scope.get('Object'))) {
+        return name
         } else {
-        self.$raise($scope.get('NameError').$new("wrong constant name " + (name), name))
-      };
-      try {
-      name = name.$to_str()
-      } catch ($err) {if (true) {
-        try {
-          self.$raise($scope.get('TypeError'), "conversion with #to_str failed")
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
-      };
+        return "" + (self) + "::" + (name)
+      }; return nil; })();
+      return self.$raise($scope.get('NameError').$new("uninitialized constant " + (full_const_name), name));
+    }, TMP_23.$$arity = 1);
+
+    Opal.defn(self, '$const_set', TMP_24 = function ːconst_set(name, value) {
+      var $a, $b, self = this;
+
+      name = $scope.get('Opal')['$const_name!'](name);
+      if ((($a = ((($b = (name['$=~']((($scope.get('Opal')).$$scope.get('CONST_NAME_REGEXP'))))['$!']()) !== false && $b !== nil && $b != null) ? $b : name['$start_with?']("::"))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        self.$raise($scope.get('NameError').$new("wrong constant name " + (name), name))};
       Opal.casgn(self, name, value);
       return value;
-    });
+    }, TMP_24.$$arity = 2);
 
-    Opal.defn(self, '$define_method', TMP_3 = function(name, method) {
-      var $a, $b, $c, TMP_4, self = this, $iter = TMP_3.$$p, block = $iter || nil, $case = nil;
+    Opal.defn(self, '$define_method', TMP_25 = function ːdefine_method(name, method) {
+      var $a, $b, $c, TMP_26, self = this, $iter = TMP_25.$$p, block = $iter || nil, $case = nil;
 
-      TMP_3.$$p = null;
-      if ((($a = method === undefined && block === nil) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_25.$$p = null;
+      if ((($a = method === undefined && block === nil) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "tried to create a Proc object without a block")};
-      ((($a = block) !== false && $a !== nil) ? $a : block = (function() {$case = method;if ($scope.get('Proc')['$===']($case)) {return method}else if ($scope.get('Method')['$===']($case)) {return method.$to_proc().$$unbound;}else if ($scope.get('UnboundMethod')['$===']($case)) {return ($b = ($c = self).$lambda, $b.$$p = (TMP_4 = function(args){var self = TMP_4.$$s || this, $a, bound = nil;
-args = $slice.call(arguments, 0);
+      ((($a = block) !== false && $a !== nil && $a != null) ? $a : block = (function() {$case = method;if ($scope.get('Proc')['$===']($case)) {return method}else if ($scope.get('Method')['$===']($case)) {return method.$to_proc().$$unbound;}else if ($scope.get('UnboundMethod')['$===']($case)) {return ($b = ($c = self).$lambda, $b.$$p = (TMP_26 = function($d_rest){var self = TMP_26.$$s || this, args, $e, bound = nil;
+
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
+        }
       bound = method.$bind(self);
-        return ($a = bound).$call.apply($a, Opal.to_a(args));}, TMP_4.$$s = self, TMP_4), $b).call($c)}else {return self.$raise($scope.get('TypeError'), "wrong argument type " + (block.$class()) + " (expected Proc/Method)")}})());
+        return ($e = bound).$call.apply($e, Opal.to_a(args));}, TMP_26.$$s = self, TMP_26.$$arity = -1, TMP_26), $b).call($c)}else {return self.$raise($scope.get('TypeError'), "wrong argument type " + (block.$class()) + " (expected Proc/Method)")}})());
       
       var id = '$' + name;
 
-      block.$$jsid = name;
-      block.$$s    = null;
-      block.$$def  = block;
+      block.$$jsid        = name;
+      block.$$s           = null;
+      block.$$def         = block;
+      block.$$define_meth = true;
 
       Opal.defn(self, id, block);
 
       return name;
     
-    });
+    }, TMP_25.$$arity = -2);
 
-    Opal.defn(self, '$remove_method', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$remove_method', TMP_27 = function ːremove_method($a_rest) {
+      var self = this, names;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var names = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        names[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      names = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        names[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = 0, length = names.length; i < length; i++) {
@@ -2444,22 +2702,22 @@ args = $slice.call(arguments, 0);
       }
     
       return self;
-    });
+    }, TMP_27.$$arity = -1);
 
-    Opal.defn(self, '$singleton_class?', function() {
+    Opal.defn(self, '$singleton_class?', TMP_28 = function() {
       var self = this;
 
       return !!self.$$is_singleton;
-    });
+    }, TMP_28.$$arity = 0);
 
-    Opal.defn(self, '$include', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$include', TMP_29 = function ːinclude($a_rest) {
+      var self = this, mods;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var mods = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        mods[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      mods = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        mods[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = mods.length - 1; i >= 0; i--) {
@@ -2478,9 +2736,40 @@ args = $slice.call(arguments, 0);
       }
     
       return self;
-    });
+    }, TMP_29.$$arity = -1);
 
-    Opal.defn(self, '$include?', function(mod) {
+    Opal.defn(self, '$included_modules', TMP_30 = function ːincluded_modules() {
+      var self = this;
+
+      
+      var results;
+
+      var module_chain = function(klass) {
+        var included = [];
+
+        for (var i = 0; i != klass.$$inc.length; i++) {
+          var mod_or_class = klass.$$inc[i];
+          included.push(mod_or_class);
+          included = included.concat(module_chain(mod_or_class));
+        }
+
+        return included;
+      };
+
+      results = module_chain(self);
+
+      // need superclass's modules
+      if (self.$$is_class) {
+          for (var cls = self; cls; cls = cls.$$super) {
+            results = results.concat(module_chain(cls));
+          }
+      }
+
+      return results;
+    
+    }, TMP_30.$$arity = 0);
+
+    Opal.defn(self, '$include?', TMP_31 = function(mod) {
       var self = this;
 
       
@@ -2494,9 +2783,9 @@ args = $slice.call(arguments, 0);
       }
       return false;
     
-    });
+    }, TMP_31.$$arity = 1);
 
-    Opal.defn(self, '$instance_method', function(name) {
+    Opal.defn(self, '$instance_method', TMP_32 = function ːinstance_method(name) {
       var self = this;
 
       
@@ -2508,13 +2797,13 @@ args = $slice.call(arguments, 0);
 
       return $scope.get('UnboundMethod').$new(self, meth, name);
     
-    });
+    }, TMP_32.$$arity = 1);
 
-    Opal.defn(self, '$instance_methods', function(include_super) {
+    Opal.defn(self, '$instance_methods', TMP_33 = function ːinstance_methods(include_super) {
       var self = this;
 
       if (include_super == null) {
-        include_super = true
+        include_super = true;
       }
       
       var methods = [],
@@ -2552,70 +2841,90 @@ args = $slice.call(arguments, 0);
 
       return methods;
     
-    });
+    }, TMP_33.$$arity = -1);
 
-    Opal.defn(self, '$included', function(mod) {
+    Opal.defn(self, '$included', TMP_34 = function ːincluded(mod) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_34.$$arity = 1);
 
-    Opal.defn(self, '$extended', function(mod) {
+    Opal.defn(self, '$extended', TMP_35 = function ːextended(mod) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_35.$$arity = 1);
 
-    Opal.defn(self, '$method_added', function() {
+    Opal.defn(self, '$method_added', TMP_36 = function ːmethod_added($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_36.$$arity = -1);
 
-    Opal.defn(self, '$method_removed', function() {
+    Opal.defn(self, '$method_removed', TMP_37 = function ːmethod_removed($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_37.$$arity = -1);
 
-    Opal.defn(self, '$method_undefined', function() {
+    Opal.defn(self, '$method_undefined', TMP_38 = function ːmethod_undefined($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_38.$$arity = -1);
 
-    Opal.defn(self, '$module_eval', TMP_5 = function() {
-      var self = this, $iter = TMP_5.$$p, block = $iter || nil;
+    Opal.defn(self, '$module_eval', TMP_39 = function ːmodule_eval($a_rest) {
+      var $b, $c, TMP_40, self = this, args, $iter = TMP_39.$$p, block = $iter || nil, string = nil, file = nil, _lineno = nil, default_eval_options = nil, compiling_options = nil, compiled = nil;
 
-      TMP_5.$$p = null;
-      if (block !== false && block !== nil) {
-        } else {
-        self.$raise($scope.get('ArgumentError'), "no block given")
-      };
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      TMP_39.$$p = null;
+      if ((($b = ($c = block['$nil?'](), $c !== false && $c !== nil && $c != null ?!!Opal.compile : $c)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        if ((($b = ($range(1, 3, false))['$cover?'](args.$size())) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+          } else {
+          $scope.get('Kernel').$raise($scope.get('ArgumentError'), "wrong number of arguments (0 for 1..3)")
+        };
+        $b = Opal.to_a(args), string = ($b[0] == null ? nil : $b[0]), file = ($b[1] == null ? nil : $b[1]), _lineno = ($b[2] == null ? nil : $b[2]), $b;
+        default_eval_options = $hash2(["file", "eval"], {"file": (((($b = file) !== false && $b !== nil && $b != null) ? $b : "(eval)")), "eval": true});
+        compiling_options = Opal.hash({ arity_check: false }).$merge(default_eval_options);
+        compiled = $scope.get('Opal').$compile(string, compiling_options);
+        block = ($b = ($c = $scope.get('Kernel')).$proc, $b.$$p = (TMP_40 = function(){var self = TMP_40.$$s || this;
+
+        
+          return (function(self) {
+            return eval(compiled);
+          })(self)
+        }, TMP_40.$$s = self, TMP_40.$$arity = 0, TMP_40), $b).call($c);
+      } else if ((($b = $rb_gt(args.$size(), 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        $scope.get('Kernel').$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (args.$size()) + " for 0)")};
       
       var old = block.$$s,
           result;
 
       block.$$s = null;
-      result = block.call(self);
+      result = block.apply(self, [self]);
       block.$$s = old;
 
       return result;
     
-    });
+    }, TMP_39.$$arity = -1);
 
     Opal.alias(self, 'class_eval', 'module_eval');
 
-    Opal.defn(self, '$module_exec', TMP_6 = function() {
-      var self = this, $iter = TMP_6.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$module_exec', TMP_41 = function ːmodule_exec($a_rest) {
+      var self = this, args, $iter = TMP_41.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_6.$$p = null;
+      TMP_41.$$p = null;
       
       if (block === nil) {
         self.$raise($scope.get('LocalJumpError'), "no block given")
@@ -2629,27 +2938,27 @@ args = $slice.call(arguments, 0);
 
       return result;
     ;
-    });
+    }, TMP_41.$$arity = -1);
 
     Opal.alias(self, 'class_exec', 'module_exec');
 
-    Opal.defn(self, '$method_defined?', function(method) {
+    Opal.defn(self, '$method_defined?', TMP_42 = function(method) {
       var self = this;
 
       
       var body = self.$$proto['$' + method];
       return (!!body) && !body.$$stub;
     
-    });
+    }, TMP_42.$$arity = 1);
 
-    Opal.defn(self, '$module_function', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$module_function', TMP_43 = function ːmodule_function($a_rest) {
+      var self = this, methods;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var methods = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        methods[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      methods = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        methods[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       if (methods.length === 0) {
@@ -2667,9 +2976,9 @@ args = $slice.call(arguments, 0);
 
       return self;
     
-    });
+    }, TMP_43.$$arity = -1);
 
-    Opal.defn(self, '$name', function() {
+    Opal.defn(self, '$name', TMP_44 = function ːname() {
       var self = this;
 
       
@@ -2699,15 +3008,15 @@ args = $slice.call(arguments, 0);
 
       return self.$$full_name = result.join('::');
     
-    });
+    }, TMP_44.$$arity = 0);
 
-    Opal.defn(self, '$remove_class_variable', function() {
+    Opal.defn(self, '$remove_class_variable', TMP_45 = function ːremove_class_variable($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_45.$$arity = -1);
 
-    Opal.defn(self, '$remove_const', function(name) {
+    Opal.defn(self, '$remove_const', TMP_46 = function ːremove_const(name) {
       var self = this;
 
       
@@ -2715,22 +3024,22 @@ args = $slice.call(arguments, 0);
       delete self.$$scope[name];
       return old;
     
-    });
+    }, TMP_46.$$arity = 1);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_47 = function ːto_s() {
       var $a, self = this;
 
-      return ((($a = Opal.Module.$name.call(self)) !== false && $a !== nil) ? $a : "#<" + (self.$$is_module ? 'Module' : 'Class') + ":0x" + (self.$__id__().$to_s(16)) + ">");
-    });
+      return ((($a = Opal.Module.$name.call(self)) !== false && $a !== nil && $a != null) ? $a : "#<" + (self.$$is_module ? 'Module' : 'Class') + ":0x" + (self.$__id__().$to_s(16)) + ">");
+    }, TMP_47.$$arity = 0);
 
-    return (Opal.defn(self, '$undef_method', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$undef_method', TMP_48 = function ːundef_method($a_rest) {
+      var self = this, names;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var names = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        names[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      names = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        names[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = 0, length = names.length; i < length; i++) {
@@ -2738,58 +3047,67 @@ args = $slice.call(arguments, 0);
       }
     
       return self;
-    }), nil) && 'undef_method';
+    }, TMP_48.$$arity = -1);
+
+    return (Opal.defn(self, '$instance_variables', TMP_49 = function ːinstance_variables() {
+      var self = this, consts = nil;
+
+      consts = self.$constants();
+      
+      var result = [];
+
+      for (var name in self) {
+        if (self.hasOwnProperty(name) && name.charAt(0) !== '$' && name !== 'constructor' && !consts['$include?'](name)) {
+          result.push('@' + name);
+        }
+      }
+
+      return result;
+    
+    }, TMP_49.$$arity = 0), nil) && 'instance_variables';
   })($scope.base, null)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/class"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
-  Opal.add_stubs(['$require', '$raise', '$allocate']);
+  Opal.add_stubs(['$require', '$allocate', '$name', '$to_s']);
   self.$require("corelib/module");
   return (function($base, $super) {
     function $Class(){};
     var self = $Class = $klass($base, $super, 'Class', $Class);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6;
 
-    Opal.defs(self, '$new', TMP_1 = function(sup) {
+    Opal.defs(self, '$new', TMP_1 = function(superclass) {
       var self = this, $iter = TMP_1.$$p, block = $iter || nil;
 
-      if (sup == null) {
-        sup = $scope.get('Object')
+      if (superclass == null) {
+        superclass = $scope.get('Object');
       }
       TMP_1.$$p = null;
       
-      if (!sup.$$is_class) {
-        self.$raise($scope.get('TypeError'), "superclass must be a Class");
+      if (!superclass.$$is_class) {
+        throw Opal.TypeError.$new("superclass must be a Class");
       }
 
-      function AnonClass(){};
-      var klass        = Opal.boot_class(sup, AnonClass)
-      klass.$$name     = nil;
-      klass.$$parent   = sup;
-      klass.$$is_class = true;
+      var alloc = Opal.boot_class_alloc(null, function(){}, superclass)
+      var klass = Opal.setup_class_object(null, alloc, superclass.$$name, superclass.constructor);
+
+      klass.$$super = superclass;
+      klass.$$parent = superclass;
 
       // inherit scope from parent
-      Opal.create_scope(sup.$$scope, klass);
+      Opal.create_scope(superclass.$$scope, klass);
 
-      sup.$inherited(klass);
-
-      if (block !== nil) {
-        var block_self = block.$$s;
-        block.$$s = null;
-        block.call(klass);
-        block.$$s = block_self;
-      }
+      superclass.$inherited(klass);
+      Opal.module_initialize(klass, block);
 
       return klass;
-    ;
-    });
+    
+    }, TMP_1.$$arity = -1);
 
-    Opal.defn(self, '$allocate', function() {
+    Opal.defn(self, '$allocate', TMP_2 = function ːallocate() {
       var self = this;
 
       
@@ -2797,24 +3115,24 @@ Opal.modules["corelib/class"] = function(Opal) {
       obj.$$id = Opal.uid();
       return obj;
     
-    });
+    }, TMP_2.$$arity = 0);
 
-    Opal.defn(self, '$inherited', function(cls) {
+    Opal.defn(self, '$inherited', TMP_3 = function ːinherited(cls) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$new', TMP_2 = function() {
-      var self = this, $iter = TMP_2.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$new', TMP_4 = function($a_rest) {
+      var self = this, args, $iter = TMP_4.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_2.$$p = null;
+      TMP_4.$$p = null;
       
       var obj = self.$allocate();
 
@@ -2822,67 +3140,83 @@ Opal.modules["corelib/class"] = function(Opal) {
       obj.$initialize.apply(obj, args);
       return obj;
     ;
-    });
+    }, TMP_4.$$arity = -1);
 
-    return (Opal.defn(self, '$superclass', function() {
+    Opal.defn(self, '$superclass', TMP_5 = function ːsuperclass() {
       var self = this;
 
       return self.$$super || nil;
-    }), nil) && 'superclass';
+    }, TMP_5.$$arity = 0);
+
+    return (Opal.defn(self, '$to_s', TMP_6 = function ːto_s() {
+      var $a, $b, self = this, $iter = TMP_6.$$p, $yield = $iter || nil;
+
+      TMP_6.$$p = null;
+      
+      var singleton_of = self.$$singleton_of;
+
+      if (singleton_of && (singleton_of.$$is_class || singleton_of.$$is_module)) {
+        return "#<Class:" + ((singleton_of).$name()) + ">";
+      }
+      else if (singleton_of) {
+        // a singleton class created from an object
+        return "#<Class:#<" + ((singleton_of.$$class).$name()) + ":0x" + ((singleton_of.$$id).$to_s(16)) + ">>";
+      }
+      return ($a = ($b = self, Opal.find_super_dispatcher(self, 'to_s', TMP_6, false)), $a.$$p = null, $a).call($b);
+    
+    }, TMP_6.$$arity = 0), nil) && 'to_s';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/basic_object"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $range = Opal.range, $hash2 = Opal.hash2;
 
-  Opal.add_stubs(['$==', '$!', '$nil?', '$cover?', '$size', '$raise', '$compile', '$lambda', '$>', '$new', '$inspect']);
+  Opal.add_stubs(['$==', '$!', '$nil?', '$cover?', '$size', '$raise', '$merge', '$compile', '$proc', '$>', '$new', '$inspect']);
   return (function($base, $super) {
     function $BasicObject(){};
     var self = $BasicObject = $klass($base, $super, 'BasicObject', $BasicObject);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_4, TMP_5;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14;
 
-    Opal.defn(self, '$initialize', function() {
+    Opal.defn(self, '$initialize', TMP_1 = function ːinitialize($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_1.$$arity = -1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_2 = function(other) {
       var self = this;
 
       return self === other;
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_3 = function(other) {
       var self = this;
 
       return self['$=='](other);
-    });
+    }, TMP_3.$$arity = 1);
 
     Opal.alias(self, 'equal?', '==');
 
-    Opal.defn(self, '$__id__', function() {
+    Opal.defn(self, '$__id__', TMP_4 = function ː__id__() {
       var self = this;
 
       return self.$$id || (self.$$id = Opal.uid());
-    });
+    }, TMP_4.$$arity = 0);
 
-    Opal.defn(self, '$__send__', TMP_1 = function(symbol) {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$__send__', TMP_5 = function ː__send__(symbol, $a_rest) {
+      var self = this, args, $iter = TMP_5.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
-      TMP_1.$$p = null;
+      TMP_5.$$p = null;
       
       var func = self['$' + symbol]
 
@@ -2900,44 +3234,49 @@ Opal.modules["corelib/basic_object"] = function(Opal) {
 
       return self.$method_missing.apply(self, [symbol].concat(args));
     
-    });
+    }, TMP_5.$$arity = -2);
 
-    Opal.defn(self, '$!', function() {
+    Opal.defn(self, '$!', TMP_6 = function() {
       var self = this;
 
       return false;
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$!=', function(other) {
+    Opal.defn(self, '$!=', TMP_7 = function(other) {
       var self = this;
 
       return (self['$=='](other))['$!']();
-    });
+    }, TMP_7.$$arity = 1);
 
     Opal.alias(self, 'equal?', '==');
 
-    Opal.defn(self, '$instance_eval', TMP_2 = function() {
-      var $a, $b, TMP_3, self = this, $iter = TMP_2.$$p, block = $iter || nil, string = nil, file = nil, _lineno = nil, compiled = nil, wrapper = nil, $splat_index = nil;
+    Opal.defn(self, '$instance_eval', TMP_8 = function ːinstance_eval($a_rest) {
+      var $b, $c, TMP_9, self = this, args, $iter = TMP_8.$$p, block = $iter || nil, string = nil, file = nil, _lineno = nil, default_eval_options = nil, compiling_options = nil, compiled = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_2.$$p = null;
-      if ((($a = ($b = block['$nil?'](), $b !== false && $b !== nil ?!!Opal.compile : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = ($range(1, 3, false))['$cover?'](args.$size())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_8.$$p = null;
+      if ((($b = ($c = block['$nil?'](), $c !== false && $c !== nil && $c != null ?!!Opal.compile : $c)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        if ((($b = ($range(1, 3, false))['$cover?'](args.$size())) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           } else {
           $scope.get('Kernel').$raise($scope.get('ArgumentError'), "wrong number of arguments (0 for 1..3)")
         };
-        $a = Opal.to_a(args), string = ($a[0] == null ? nil : $a[0]), file = ($a[1] == null ? nil : $a[1]), _lineno = ($a[2] == null ? nil : $a[2]), $a;
-        compiled = $scope.get('Opal').$compile(string, $hash2(["file", "eval"], {"file": (((($a = file) !== false && $a !== nil) ? $a : "(eval)")), "eval": true}));
-        wrapper = function() {return eval(compiled)};
-        block = ($a = ($b = $scope.get('Kernel')).$lambda, $a.$$p = (TMP_3 = function(){var self = TMP_3.$$s || this;
+        $b = Opal.to_a(args), string = ($b[0] == null ? nil : $b[0]), file = ($b[1] == null ? nil : $b[1]), _lineno = ($b[2] == null ? nil : $b[2]), $b;
+        default_eval_options = $hash2(["file", "eval"], {"file": (((($b = file) !== false && $b !== nil && $b != null) ? $b : "(eval)")), "eval": true});
+        compiling_options = Opal.hash({ arity_check: false }).$merge(default_eval_options);
+        compiled = $scope.get('Opal').$compile(string, compiling_options);
+        block = ($b = ($c = $scope.get('Kernel')).$proc, $b.$$p = (TMP_9 = function(){var self = TMP_9.$$s || this;
 
-        return wrapper.call(self);}, TMP_3.$$s = self, TMP_3), $a).call($b);
-      } else if ((($a = $rb_gt(args.$size(), 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        
+          return (function(self) {
+            return eval(compiled);
+          })(self)
+        }, TMP_9.$$s = self, TMP_9.$$arity = 0, TMP_9), $b).call($c);
+      } else if ((($b = $rb_gt(args.$size(), 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         $scope.get('Kernel').$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (args.$size()) + " for 0)")};
       
       var old = block.$$s,
@@ -2965,19 +3304,19 @@ Opal.modules["corelib/basic_object"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_8.$$arity = -1);
 
-    Opal.defn(self, '$instance_exec', TMP_4 = function() {
-      var self = this, $iter = TMP_4.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$instance_exec', TMP_10 = function ːinstance_exec($a_rest) {
+      var self = this, args, $iter = TMP_10.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_4.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_10.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
         $scope.get('Kernel').$raise($scope.get('ArgumentError'), "no block given")
       };
@@ -3004,48 +3343,46 @@ Opal.modules["corelib/basic_object"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_10.$$arity = -1);
 
-    Opal.defn(self, '$singleton_method_added', function() {
+    Opal.defn(self, '$singleton_method_added', TMP_11 = function ːsingleton_method_added($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_11.$$arity = -1);
 
-    Opal.defn(self, '$singleton_method_removed', function() {
+    Opal.defn(self, '$singleton_method_removed', TMP_12 = function ːsingleton_method_removed($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_12.$$arity = -1);
 
-    Opal.defn(self, '$singleton_method_undefined', function() {
+    Opal.defn(self, '$singleton_method_undefined', TMP_13 = function ːsingleton_method_undefined($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_13.$$arity = -1);
 
-    return (Opal.defn(self, '$method_missing', TMP_5 = function(symbol) {
-      var $a, self = this, $iter = TMP_5.$$p, block = $iter || nil, $splat_index = nil;
+    return (Opal.defn(self, '$method_missing', TMP_14 = function ːmethod_missing(symbol, $a_rest) {
+      var $b, self = this, args, $iter = TMP_14.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
-      TMP_5.$$p = null;
-      return $scope.get('Kernel').$raise($scope.get('NoMethodError').$new((function() {if ((($a = self.$inspect && !self.$inspect.$$stub) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_14.$$p = null;
+      return $scope.get('Kernel').$raise($scope.get('NoMethodError').$new((function() {if ((($b = self.$inspect && !self.$inspect.$$stub) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         return "undefined method `" + (symbol) + "' for " + (self.$inspect()) + ":" + (self.$$class)
         } else {
         return "undefined method `" + (symbol) + "' for " + (self.$$class)
       }; return nil; })(), symbol));
-    }), nil) && 'method_missing';
+    }, TMP_14.$$arity = -2), nil) && 'method_missing';
   })($scope.base, null)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/kernel"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -3054,44 +3391,44 @@ Opal.modules["corelib/kernel"] = function(Opal) {
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $module = Opal.module, $gvars = Opal.gvars, $hash2 = Opal.hash2, $klass = Opal.klass;
 
-  Opal.add_stubs(['$raise', '$new', '$inspect', '$!', '$=~', '$==', '$object_id', '$class', '$coerce_to?', '$<<', '$allocate', '$copy_instance_variables', '$copy_singleton_methods', '$initialize_clone', '$initialize_copy', '$define_method', '$to_proc', '$singleton_class', '$initialize_dup', '$for', '$loop', '$pop', '$call', '$append_features', '$extended', '$length', '$respond_to?', '$[]', '$nil?', '$to_a', '$to_int', '$fetch', '$Integer', '$Float', '$to_ary', '$to_str', '$coerce_to', '$to_s', '$__id__', '$instance_variable_name!', '$coerce_to!', '$===', '$>', '$print', '$format', '$puts', '$each', '$<=', '$empty?', '$exception', '$kind_of?', '$respond_to_missing?', '$try_convert!', '$expand_path', '$join', '$start_with?', '$sym', '$arg', '$include']);
+  Opal.add_stubs(['$raise', '$new', '$inspect', '$!', '$=~', '$==', '$object_id', '$class', '$coerce_to?', '$<<', '$allocate', '$copy_instance_variables', '$copy_singleton_methods', '$initialize_clone', '$initialize_copy', '$define_method', '$to_proc', '$singleton_class', '$initialize_dup', '$for', '$>', '$size', '$pop', '$call', '$append_features', '$extended', '$length', '$respond_to?', '$[]', '$nil?', '$to_a', '$to_int', '$fetch', '$Integer', '$Float', '$to_ary', '$to_str', '$coerce_to', '$to_s', '$__id__', '$instance_variable_name!', '$coerce_to!', '$===', '$enum_for', '$print', '$format', '$puts', '$each', '$<=', '$empty?', '$exception', '$kind_of?', '$respond_to_missing?', '$try_convert!', '$expand_path', '$join', '$start_with?', '$sym', '$arg', '$open', '$include']);
   (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_6, TMP_7, TMP_8, TMP_10, TMP_11;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_36, TMP_37, TMP_38, TMP_39, TMP_40, TMP_41, TMP_42, TMP_43, TMP_45, TMP_46, TMP_47, TMP_48, TMP_49, TMP_50, TMP_51, TMP_52, TMP_53, TMP_54, TMP_55, TMP_56, TMP_57, TMP_58, TMP_59, TMP_60, TMP_61, TMP_62, TMP_63;
 
-    Opal.defn(self, '$method_missing', TMP_1 = function(symbol) {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$method_missing', TMP_1 = function ːmethod_missing(symbol, $a_rest) {
+      var self = this, args, $iter = TMP_1.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
       TMP_1.$$p = null;
       return self.$raise($scope.get('NoMethodError').$new("undefined method `" + (symbol) + "' for " + (self.$inspect()), symbol, args));
-    });
+    }, TMP_1.$$arity = -2);
 
-    Opal.defn(self, '$=~', function(obj) {
+    Opal.defn(self, '$=~', TMP_2 = function(obj) {
       var self = this;
 
       return false;
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defn(self, '$!~', function(obj) {
+    Opal.defn(self, '$!~', TMP_3 = function(obj) {
       var self = this;
 
       return (self['$=~'](obj))['$!']();
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$===', function(other) {
+    Opal.defn(self, '$===', TMP_4 = function(other) {
       var $a, self = this;
 
-      return ((($a = self.$object_id()['$=='](other.$object_id())) !== false && $a !== nil) ? $a : self['$=='](other));
-    });
+      return ((($a = self.$object_id()['$=='](other.$object_id())) !== false && $a !== nil && $a != null) ? $a : self['$=='](other));
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_5 = function(other) {
       var self = this;
 
       
@@ -3106,9 +3443,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$method', function(name) {
+    Opal.defn(self, '$method', TMP_6 = function ːmethod(name) {
       var self = this;
 
       
@@ -3120,13 +3457,13 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return $scope.get('Method').$new(self, meth, name);
     
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$methods', function(all) {
+    Opal.defn(self, '$methods', TMP_7 = function ːmethods(all) {
       var self = this;
 
       if (all == null) {
-        all = true
+        all = true;
       }
       
       var methods = [];
@@ -3146,11 +3483,11 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return methods;
     
-    });
+    }, TMP_7.$$arity = -1);
 
     Opal.alias(self, 'public_methods', 'methods');
 
-    Opal.defn(self, '$Array', function(object) {
+    Opal.defn(self, '$Array', TMP_8 = function ːArray(object) {
       var self = this;
 
       
@@ -3172,30 +3509,30 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return [object];
     
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$at_exit', TMP_2 = function() {
-      var $a, self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$at_exit', TMP_9 = function ːat_exit() {
+      var $a, self = this, $iter = TMP_9.$$p, block = $iter || nil;
       if ($gvars.__at_exit__ == null) $gvars.__at_exit__ = nil;
 
-      TMP_2.$$p = null;
-      ((($a = $gvars.__at_exit__) !== false && $a !== nil) ? $a : $gvars.__at_exit__ = []);
+      TMP_9.$$p = null;
+      ((($a = $gvars.__at_exit__) !== false && $a !== nil && $a != null) ? $a : $gvars.__at_exit__ = []);
       return $gvars.__at_exit__['$<<'](block);
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$caller', function() {
+    Opal.defn(self, '$caller', TMP_10 = function ːcaller() {
       var self = this;
 
       return [];
-    });
+    }, TMP_10.$$arity = 0);
 
-    Opal.defn(self, '$class', function() {
+    Opal.defn(self, '$class', TMP_11 = function() {
       var self = this;
 
       return self.$$class;
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$copy_instance_variables', function(other) {
+    Opal.defn(self, '$copy_instance_variables', TMP_12 = function ːcopy_instance_variables(other) {
       var self = this;
 
       
@@ -3205,9 +3542,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$copy_singleton_methods', function(other) {
+    Opal.defn(self, '$copy_singleton_methods', TMP_13 = function ːcopy_singleton_methods(other) {
       var self = this;
 
       
@@ -3230,9 +3567,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_13.$$arity = 1);
 
-    Opal.defn(self, '$clone', function() {
+    Opal.defn(self, '$clone', TMP_14 = function ːclone() {
       var self = this, copy = nil;
 
       copy = self.$class().$allocate();
@@ -3240,91 +3577,85 @@ Opal.modules["corelib/kernel"] = function(Opal) {
       copy.$copy_singleton_methods(self);
       copy.$initialize_clone(self);
       return copy;
-    });
+    }, TMP_14.$$arity = 0);
 
-    Opal.defn(self, '$initialize_clone', function(other) {
+    Opal.defn(self, '$initialize_clone', TMP_15 = function ːinitialize_clone(other) {
       var self = this;
 
       return self.$initialize_copy(other);
-    });
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$define_singleton_method', TMP_3 = function(name, method) {
-      var $a, $b, self = this, $iter = TMP_3.$$p, block = $iter || nil;
+    Opal.defn(self, '$define_singleton_method', TMP_16 = function ːdefine_singleton_method(name, method) {
+      var $a, $b, self = this, $iter = TMP_16.$$p, block = $iter || nil;
 
-      TMP_3.$$p = null;
+      TMP_16.$$p = null;
       return ($a = ($b = self.$singleton_class()).$define_method, $a.$$p = block.$to_proc(), $a).call($b, name, method);
-    });
+    }, TMP_16.$$arity = -2);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_17 = function ːdup() {
       var self = this, copy = nil;
 
       copy = self.$class().$allocate();
       copy.$copy_instance_variables(self);
       copy.$initialize_dup(self);
       return copy;
-    });
+    }, TMP_17.$$arity = 0);
 
-    Opal.defn(self, '$initialize_dup', function(other) {
+    Opal.defn(self, '$initialize_dup', TMP_18 = function ːinitialize_dup(other) {
       var self = this;
 
       return self.$initialize_copy(other);
-    });
+    }, TMP_18.$$arity = 1);
 
-    Opal.defn(self, '$enum_for', TMP_4 = function(method) {
-      var $a, $b, self = this, $iter = TMP_4.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$enum_for', TMP_19 = function ːenum_for(method, $a_rest) {
+      var $b, $c, self = this, args, $iter = TMP_19.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
-      }
       if (method == null) {
-        method = "each"
+        method = "each";
       }
-      TMP_4.$$p = null;
-      return ($a = ($b = $scope.get('Enumerator')).$for, $a.$$p = block.$to_proc(), $a).apply($b, [self, method].concat(Opal.to_a(args)));
-    });
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
+      }
+      TMP_19.$$p = null;
+      return ($b = ($c = $scope.get('Enumerator')).$for, $b.$$p = block.$to_proc(), $b).apply($c, [self, method].concat(Opal.to_a(args)));
+    }, TMP_19.$$arity = -1);
 
     Opal.alias(self, 'to_enum', 'enum_for');
 
-    Opal.defn(self, '$equal?', function(other) {
+    Opal.defn(self, '$equal?', TMP_20 = function(other) {
       var self = this;
 
       return self === other;
-    });
+    }, TMP_20.$$arity = 1);
 
-    Opal.defn(self, '$exit', function(status) {
-      var $a, $b, TMP_5, self = this;
+    Opal.defn(self, '$exit', TMP_21 = function ːexit(status) {
+      var $a, $b, self = this, block = nil;
       if ($gvars.__at_exit__ == null) $gvars.__at_exit__ = nil;
 
       if (status == null) {
-        status = true
+        status = true;
       }
-      ((($a = $gvars.__at_exit__) !== false && $a !== nil) ? $a : $gvars.__at_exit__ = []);
-      ($a = ($b = self).$loop, $a.$$p = (TMP_5 = function(){var self = TMP_5.$$s || this, block = nil;
-        if ($gvars.__at_exit__ == null) $gvars.__at_exit__ = nil;
-
+      ((($a = $gvars.__at_exit__) !== false && $a !== nil && $a != null) ? $a : $gvars.__at_exit__ = []);
+      while ((($b = $rb_gt($gvars.__at_exit__.$size(), 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
       block = $gvars.__at_exit__.$pop();
-        if (block !== false && block !== nil) {
-          return block.$call()
-          } else {
-          return ($breaker.$v = nil, $breaker)
-        };}, TMP_5.$$s = self, TMP_5), $a).call($b);
-      if ((($a = status === true) !== nil && (!$a.$$is_boolean || $a == true))) {
+      block.$call();};
+      if ((($a = status === true) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         status = 0};
       Opal.exit(status);
       return nil;
-    });
+    }, TMP_21.$$arity = -1);
 
-    Opal.defn(self, '$extend', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$extend', TMP_22 = function ːextend($a_rest) {
+      var self = this, mods;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var mods = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        mods[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      mods = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        mods[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var singleton = self.$singleton_class();
@@ -3341,21 +3672,21 @@ Opal.modules["corelib/kernel"] = function(Opal) {
       }
     ;
       return self;
-    });
+    }, TMP_22.$$arity = -1);
 
-    Opal.defn(self, '$format', function(format_string) {
-      var $a, $b, self = this, ary = nil, $splat_index = nil;
+    Opal.defn(self, '$format', TMP_23 = function ːformat(format_string, $a_rest) {
+      var $b, $c, self = this, args, ary = nil;
       if ($gvars.DEBUG == null) $gvars.DEBUG = nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
-      if ((($a = (($b = args.$length()['$=='](1)) ? args['$[]'](0)['$respond_to?']("to_ary") : args.$length()['$=='](1))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = (($c = args.$length()['$=='](1)) ? args['$[]'](0)['$respond_to?']("to_ary") : args.$length()['$=='](1))) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         ary = $scope.get('Opal')['$coerce_to?'](args['$[]'](0), $scope.get('Array'), "to_ary");
-        if ((($a = ary['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = ary['$nil?']()) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           } else {
           args = ary.$to_a()
         };};
@@ -3892,27 +4223,27 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return result + format_string.slice(begin_slice);
     ;
-    });
+    }, TMP_23.$$arity = -2);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_24 = function ːhash() {
       var self = this;
 
       return self.$__id__();
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$initialize_copy', function(other) {
+    Opal.defn(self, '$initialize_copy', TMP_25 = function ːinitialize_copy(other) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_25.$$arity = 1);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_26 = function ːinspect() {
       var self = this;
 
       return self.$to_s();
-    });
+    }, TMP_26.$$arity = 0);
 
-    Opal.defn(self, '$instance_of?', function(klass) {
+    Opal.defn(self, '$instance_of?', TMP_27 = function(klass) {
       var self = this;
 
       
@@ -3922,16 +4253,16 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return self.$$class === klass;
     ;
-    });
+    }, TMP_27.$$arity = 1);
 
-    Opal.defn(self, '$instance_variable_defined?', function(name) {
+    Opal.defn(self, '$instance_variable_defined?', TMP_28 = function(name) {
       var self = this;
 
       name = $scope.get('Opal')['$instance_variable_name!'](name);
       return Opal.hasOwnProperty.call(self, name.substr(1));
-    });
+    }, TMP_28.$$arity = 1);
 
-    Opal.defn(self, '$instance_variable_get', function(name) {
+    Opal.defn(self, '$instance_variable_get', TMP_29 = function ːinstance_variable_get(name) {
       var self = this;
 
       name = $scope.get('Opal')['$instance_variable_name!'](name);
@@ -3940,16 +4271,16 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return ivar == null ? nil : ivar;
     
-    });
+    }, TMP_29.$$arity = 1);
 
-    Opal.defn(self, '$instance_variable_set', function(name, value) {
+    Opal.defn(self, '$instance_variable_set', TMP_30 = function ːinstance_variable_set(name, value) {
       var self = this;
 
       name = $scope.get('Opal')['$instance_variable_name!'](name);
       return self[Opal.ivar(name.substr(1))] = value;
-    });
+    }, TMP_30.$$arity = 2);
 
-    Opal.defn(self, '$remove_instance_variable', function(name) {
+    Opal.defn(self, '$remove_instance_variable', TMP_31 = function ːremove_instance_variable(name) {
       var self = this;
 
       name = $scope.get('Opal')['$instance_variable_name!'](name);
@@ -3963,9 +4294,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
       }
     
       return self.$raise($scope.get('NameError'), "instance variable " + (name) + " not defined");
-    });
+    }, TMP_31.$$arity = 1);
 
-    Opal.defn(self, '$instance_variables', function() {
+    Opal.defn(self, '$instance_variables', TMP_32 = function ːinstance_variables() {
       var self = this;
 
       
@@ -3984,9 +4315,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_32.$$arity = 0);
 
-    Opal.defn(self, '$Integer', function(value, base) {
+    Opal.defn(self, '$Integer', TMP_33 = function ːInteger(value, base) {
       var self = this;
 
       
@@ -4070,9 +4401,9 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return i;
     ;
-    });
+    }, TMP_33.$$arity = -2);
 
-    Opal.defn(self, '$Float', function(value) {
+    Opal.defn(self, '$Float', TMP_34 = function ːFloat(value) {
       var self = this;
 
       
@@ -4101,19 +4432,19 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return $scope.get('Opal')['$coerce_to!'](value, $scope.get('Float'), "to_f");
     
-    });
+    }, TMP_34.$$arity = 1);
 
-    Opal.defn(self, '$Hash', function(arg) {
+    Opal.defn(self, '$Hash', TMP_35 = function ːHash(arg) {
       var $a, $b, self = this;
 
-      if ((($a = ((($b = arg['$nil?']()) !== false && $b !== nil) ? $b : arg['$==']([]))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = arg['$nil?']()) !== false && $b !== nil && $b != null) ? $b : arg['$==']([]))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $hash2([], {})};
-      if ((($a = $scope.get('Hash')['$==='](arg)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Hash')['$==='](arg)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return arg};
       return $scope.get('Opal')['$coerce_to!'](arg, $scope.get('Hash'), "to_hash");
-    });
+    }, TMP_35.$$arity = 1);
 
-    Opal.defn(self, '$is_a?', function(klass) {
+    Opal.defn(self, '$is_a?', TMP_36 = function(klass) {
       var self = this;
 
       
@@ -4123,146 +4454,148 @@ Opal.modules["corelib/kernel"] = function(Opal) {
 
       return Opal.is_a(self, klass);
     ;
-    });
+    }, TMP_36.$$arity = 1);
 
     Opal.alias(self, 'kind_of?', 'is_a?');
 
-    Opal.defn(self, '$lambda', TMP_6 = function() {
-      var self = this, $iter = TMP_6.$$p, block = $iter || nil;
+    Opal.defn(self, '$lambda', TMP_37 = function ːlambda() {
+      var self = this, $iter = TMP_37.$$p, block = $iter || nil;
 
-      TMP_6.$$p = null;
+      TMP_37.$$p = null;
       block.$$is_lambda = true;
       return block;
-    });
+    }, TMP_37.$$arity = 0);
 
-    Opal.defn(self, '$load', function(file) {
+    Opal.defn(self, '$load', TMP_38 = function ːload(file) {
       var self = this;
 
       file = $scope.get('Opal')['$coerce_to!'](file, $scope.get('String'), "to_str");
       return Opal.load(file);
-    });
+    }, TMP_38.$$arity = 1);
 
-    Opal.defn(self, '$loop', TMP_7 = function() {
-      var self = this, $iter = TMP_7.$$p, block = $iter || nil;
+    Opal.defn(self, '$loop', TMP_39 = function ːloop() {
+      var self = this, $iter = TMP_39.$$p, $yield = $iter || nil;
 
-      TMP_7.$$p = null;
+      TMP_39.$$p = null;
+      if (($yield !== nil)) {
+        } else {
+        return self.$enum_for("loop")
+      };
       
       while (true) {
-        if (block() === $breaker) {
-          return $breaker.$v;
-        }
+        Opal.yieldX($yield, [])
       }
-    
+    ;
       return self;
-    });
+    }, TMP_39.$$arity = 0);
 
-    Opal.defn(self, '$nil?', function() {
+    Opal.defn(self, '$nil?', TMP_40 = function() {
       var self = this;
 
       return false;
-    });
+    }, TMP_40.$$arity = 0);
 
     Opal.alias(self, 'object_id', '__id__');
 
-    Opal.defn(self, '$printf', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defn(self, '$printf', TMP_41 = function ːprintf($a_rest) {
+      var $b, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      if ((($a = $rb_gt(args.$length(), 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        self.$print(($a = self).$format.apply($a, Opal.to_a(args)))};
+      if ((($b = $rb_gt(args.$length(), 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        self.$print(($b = self).$format.apply($b, Opal.to_a(args)))};
       return nil;
-    });
+    }, TMP_41.$$arity = -1);
 
-    Opal.defn(self, '$proc', TMP_8 = function() {
-      var self = this, $iter = TMP_8.$$p, block = $iter || nil;
+    Opal.defn(self, '$proc', TMP_42 = function ːproc() {
+      var self = this, $iter = TMP_42.$$p, block = $iter || nil;
 
-      TMP_8.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_42.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
         self.$raise($scope.get('ArgumentError'), "tried to create Proc object without a block")
       };
       block.$$is_lambda = false;
       return block;
-    });
+    }, TMP_42.$$arity = 0);
 
-    Opal.defn(self, '$puts', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defn(self, '$puts', TMP_43 = function ːputs($a_rest) {
+      var $b, self = this, strs;
       if ($gvars.stdout == null) $gvars.stdout = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var strs = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        strs[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      strs = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        strs[$arg_idx - 0] = arguments[$arg_idx];
       }
-      return ($a = $gvars.stdout).$puts.apply($a, Opal.to_a(strs));
-    });
+      return ($b = $gvars.stdout).$puts.apply($b, Opal.to_a(strs));
+    }, TMP_43.$$arity = -1);
 
-    Opal.defn(self, '$p', function() {
-      var $a, $b, TMP_9, self = this, $splat_index = nil;
+    Opal.defn(self, '$p', TMP_45 = function ːp($a_rest) {
+      var $b, $c, TMP_44, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      ($a = ($b = args).$each, $a.$$p = (TMP_9 = function(obj){var self = TMP_9.$$s || this;
+      ($b = ($c = args).$each, $b.$$p = (TMP_44 = function(obj){var self = TMP_44.$$s || this;
         if ($gvars.stdout == null) $gvars.stdout = nil;
 if (obj == null) obj = nil;
-      return $gvars.stdout.$puts(obj.$inspect())}, TMP_9.$$s = self, TMP_9), $a).call($b);
-      if ((($a = $rb_le(args.$length(), 1)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      return $gvars.stdout.$puts(obj.$inspect())}, TMP_44.$$s = self, TMP_44.$$arity = 1, TMP_44), $b).call($c);
+      if ((($b = $rb_le(args.$length(), 1)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         return args['$[]'](0)
         } else {
         return args
       };
-    });
+    }, TMP_45.$$arity = -1);
 
-    Opal.defn(self, '$print', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defn(self, '$print', TMP_46 = function ːprint($a_rest) {
+      var $b, self = this, strs;
       if ($gvars.stdout == null) $gvars.stdout = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var strs = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        strs[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      strs = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        strs[$arg_idx - 0] = arguments[$arg_idx];
       }
-      return ($a = $gvars.stdout).$print.apply($a, Opal.to_a(strs));
-    });
+      return ($b = $gvars.stdout).$print.apply($b, Opal.to_a(strs));
+    }, TMP_46.$$arity = -1);
 
-    Opal.defn(self, '$warn', function() {
-      var $a, $b, self = this, $splat_index = nil;
+    Opal.defn(self, '$warn', TMP_47 = function ːwarn($a_rest) {
+      var $b, $c, self = this, strs;
       if ($gvars.VERBOSE == null) $gvars.VERBOSE = nil;
       if ($gvars.stderr == null) $gvars.stderr = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var strs = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        strs[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      strs = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        strs[$arg_idx - 0] = arguments[$arg_idx];
       }
-      if ((($a = ((($b = $gvars.VERBOSE['$nil?']()) !== false && $b !== nil) ? $b : strs['$empty?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = ((($c = $gvars.VERBOSE['$nil?']()) !== false && $c !== nil && $c != null) ? $c : strs['$empty?']())) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         return nil
         } else {
-        return ($a = $gvars.stderr).$puts.apply($a, Opal.to_a(strs))
+        return ($b = $gvars.stderr).$puts.apply($b, Opal.to_a(strs))
       };
-    });
+    }, TMP_47.$$arity = -1);
 
-    Opal.defn(self, '$raise', function(exception, string, _backtrace) {
+    Opal.defn(self, '$raise', TMP_48 = function ːraise(exception, string, _backtrace) {
       var self = this;
       if ($gvars["!"] == null) $gvars["!"] = nil;
 
       if (string == null) {
-        string = nil
+        string = nil;
       }
       if (_backtrace == null) {
-        _backtrace = nil
+        _backtrace = nil;
       }
       
       if (exception == null && $gvars["!"] !== nil) {
@@ -4293,11 +4626,11 @@ if (obj == null) obj = nil;
 
       throw exception;
     ;
-    });
+    }, TMP_48.$$arity = -1);
 
     Opal.alias(self, 'fail', 'raise');
 
-    Opal.defn(self, '$rand', function(max) {
+    Opal.defn(self, '$rand', TMP_49 = function ːrand(max) {
       var self = this;
 
       
@@ -4315,15 +4648,15 @@ if (obj == null) obj = nil;
           Math.abs($scope.get('Opal').$coerce_to(max, $scope.get('Integer'), "to_int")));
       }
     
-    });
+    }, TMP_49.$$arity = -1);
 
-    Opal.defn(self, '$respond_to?', function(name, include_all) {
+    Opal.defn(self, '$respond_to?', TMP_50 = function(name, include_all) {
       var $a, self = this;
 
       if (include_all == null) {
-        include_all = false
+        include_all = false;
       }
-      if ((($a = self['$respond_to_missing?'](name, include_all)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$respond_to_missing?'](name, include_all)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
       
       var body = self['$' + name];
@@ -4333,33 +4666,33 @@ if (obj == null) obj = nil;
       }
     
       return false;
-    });
+    }, TMP_50.$$arity = -2);
 
-    Opal.defn(self, '$respond_to_missing?', function(method_name, include_all) {
+    Opal.defn(self, '$respond_to_missing?', TMP_51 = function(method_name, include_all) {
       var self = this;
 
       if (include_all == null) {
-        include_all = false
+        include_all = false;
       }
       return false;
-    });
+    }, TMP_51.$$arity = -2);
 
-    Opal.defn(self, '$require', function(file) {
+    Opal.defn(self, '$require', TMP_52 = function ːrequire(file) {
       var self = this;
 
       file = $scope.get('Opal')['$coerce_to!'](file, $scope.get('String'), "to_str");
       return Opal.require(file);
-    });
+    }, TMP_52.$$arity = 1);
 
-    Opal.defn(self, '$require_relative', function(file) {
+    Opal.defn(self, '$require_relative', TMP_53 = function ːrequire_relative(file) {
       var self = this;
 
       $scope.get('Opal')['$try_convert!'](file, $scope.get('String'), "to_str");
       file = $scope.get('File').$expand_path($scope.get('File').$join(Opal.current_file, "..", file));
       return Opal.require(file);
-    });
+    }, TMP_53.$$arity = 1);
 
-    Opal.defn(self, '$require_tree', function(path) {
+    Opal.defn(self, '$require_tree', TMP_54 = function ːrequire_tree(path) {
       var self = this;
 
       path = $scope.get('File').$expand_path(path);
@@ -4373,23 +4706,23 @@ if (obj == null) obj = nil;
       }
     ;
       return nil;
-    });
+    }, TMP_54.$$arity = 1);
 
     Opal.alias(self, 'send', '__send__');
 
     Opal.alias(self, 'public_send', '__send__');
 
-    Opal.defn(self, '$singleton_class', function() {
+    Opal.defn(self, '$singleton_class', TMP_55 = function ːsingleton_class() {
       var self = this;
 
       return Opal.get_singleton_class(self);
-    });
+    }, TMP_55.$$arity = 0);
 
-    Opal.defn(self, '$sleep', function(seconds) {
+    Opal.defn(self, '$sleep', TMP_56 = function ːsleep(seconds) {
       var self = this;
 
       if (seconds == null) {
-        seconds = nil
+        seconds = nil;
       }
       
       if (seconds === nil) {
@@ -4405,67 +4738,79 @@ if (obj == null) obj = nil;
       while (new Date() - t <= seconds * 1000);
       return seconds;
     ;
-    });
+    }, TMP_56.$$arity = -1);
 
     Opal.alias(self, 'sprintf', 'format');
 
     Opal.alias(self, 'srand', 'rand');
 
-    Opal.defn(self, '$String', function(str) {
+    Opal.defn(self, '$String', TMP_57 = function ːString(str) {
       var $a, self = this;
 
-      return ((($a = $scope.get('Opal')['$coerce_to?'](str, $scope.get('String'), "to_str")) !== false && $a !== nil) ? $a : $scope.get('Opal')['$coerce_to!'](str, $scope.get('String'), "to_s"));
-    });
+      return ((($a = $scope.get('Opal')['$coerce_to?'](str, $scope.get('String'), "to_str")) !== false && $a !== nil && $a != null) ? $a : $scope.get('Opal')['$coerce_to!'](str, $scope.get('String'), "to_s"));
+    }, TMP_57.$$arity = 1);
 
-    Opal.defn(self, '$tap', TMP_10 = function() {
-      var self = this, $iter = TMP_10.$$p, block = $iter || nil;
+    Opal.defn(self, '$tap', TMP_58 = function ːtap() {
+      var self = this, $iter = TMP_58.$$p, block = $iter || nil;
 
-      TMP_10.$$p = null;
-      if (Opal.yield1(block, self) === $breaker) return $breaker.$v;
+      TMP_58.$$p = null;
+      Opal.yield1(block, self);
       return self;
-    });
+    }, TMP_58.$$arity = 0);
 
-    Opal.defn(self, '$to_proc', function() {
+    Opal.defn(self, '$to_proc', TMP_59 = function ːto_proc() {
       var self = this;
 
       return self;
-    });
+    }, TMP_59.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_60 = function ːto_s() {
       var self = this;
 
       return "#<" + (self.$class()) + ":0x" + (self.$__id__().$to_s(16)) + ">";
-    });
+    }, TMP_60.$$arity = 0);
 
-    Opal.defn(self, '$catch', TMP_11 = function(sym) {
-      var $a, self = this, $iter = TMP_11.$$p, $yield = $iter || nil, e = nil;
+    Opal.defn(self, '$catch', TMP_61 = function(sym) {
+      var self = this, $iter = TMP_61.$$p, $yield = $iter || nil, e = nil;
 
-      TMP_11.$$p = null;
+      TMP_61.$$p = null;
       try {
-      return $a = Opal.yieldX($yield, []), $a === $breaker ? $a : $a
-      } catch ($err) {if (Opal.rescue($err, [$scope.get('UncaughtThrowError')])) {e = $err;
-        try {
-          if (e.$sym()['$=='](sym)) {
-            return e.$arg()};
-          return self.$raise();
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
+        return Opal.yieldX($yield, []);
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('UncaughtThrowError')])) {e = $err;
+          try {
+            if (e.$sym()['$=='](sym)) {
+              return e.$arg()};
+            return self.$raise();
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
       };
-    });
+    }, TMP_61.$$arity = 1);
 
-    Opal.defn(self, '$throw', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$throw', TMP_62 = function($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       return self.$raise($scope.get('UncaughtThrowError').$new(args));
-    });
+    }, TMP_62.$$arity = -1);
+
+    Opal.defn(self, '$open', TMP_63 = function ːopen($a_rest) {
+      var $b, $c, self = this, args, $iter = TMP_63.$$p, block = $iter || nil;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      TMP_63.$$p = null;
+      return ($b = ($c = $scope.get('File')).$open, $b.$$p = block.$to_proc(), $b).apply($c, Opal.to_a(args));
+    }, TMP_63.$$arity = -1);
   })($scope.base);
   return (function($base, $super) {
     function $Object(){};
@@ -4476,10 +4821,8 @@ if (obj == null) obj = nil;
     return self.$include($scope.get('Kernel'))
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/error"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -4490,17 +4833,17 @@ Opal.modules["corelib/error"] = function(Opal) {
     function $Exception(){};
     var self = $Exception = $klass($base, $super, 'Exception', $Exception);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8;
 
     def.message = nil;
-    Opal.defs(self, '$new', function() {
-      var self = this, $splat_index = nil;
+    Opal.defs(self, '$new', TMP_1 = function($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var message = (args.length > 0) ? args[0] : nil;
@@ -4514,33 +4857,33 @@ Opal.modules["corelib/error"] = function(Opal) {
       err.$initialize.apply(err, args);
       return err;
     
-    });
+    }, TMP_1.$$arity = -1);
 
-    Opal.defs(self, '$exception', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defs(self, '$exception', TMP_2 = function ːexception($a_rest) {
+      var $b, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      return ($a = self).$new.apply($a, Opal.to_a(args));
-    });
+      return ($b = self).$new.apply($b, Opal.to_a(args));
+    }, TMP_2.$$arity = -1);
 
-    Opal.defn(self, '$initialize', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$initialize', TMP_3 = function ːinitialize($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       return self.message = (args.length > 0) ? args[0] : nil;
-    });
+    }, TMP_3.$$arity = -1);
 
-    Opal.defn(self, '$backtrace', function() {
+    Opal.defn(self, '$backtrace', TMP_4 = function ːbacktrace() {
       var self = this;
 
       
@@ -4555,13 +4898,13 @@ Opal.modules["corelib/error"] = function(Opal) {
 
       return [];
     
-    });
+    }, TMP_4.$$arity = 0);
 
-    Opal.defn(self, '$exception', function(str) {
+    Opal.defn(self, '$exception', TMP_5 = function ːexception(str) {
       var self = this;
 
       if (str == null) {
-        str = nil
+        str = nil;
       }
       
       if (str === nil || self === str) {
@@ -4572,30 +4915,30 @@ Opal.modules["corelib/error"] = function(Opal) {
       cloned.message = str;
       return cloned;
     
-    });
+    }, TMP_5.$$arity = -1);
 
-    Opal.defn(self, '$message', function() {
+    Opal.defn(self, '$message', TMP_6 = function ːmessage() {
       var self = this;
 
       return self.$to_s();
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_7 = function ːinspect() {
       var $a, self = this, as_str = nil;
 
       as_str = self.$to_s();
-      if ((($a = as_str['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = as_str['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$class().$to_s()
         } else {
         return "#<" + (self.$class().$to_s()) + ": " + (self.$to_s()) + ">"
       };
-    });
+    }, TMP_7.$$arity = 0);
 
-    return (Opal.defn(self, '$to_s', function() {
+    return (Opal.defn(self, '$to_s', TMP_8 = function ːto_s() {
       var $a, $b, self = this;
 
-      return ((($a = (($b = self.message, $b !== false && $b !== nil ?self.message.$to_s() : $b))) !== false && $a !== nil) ? $a : self.$class().$to_s());
-    }), nil) && 'to_s';
+      return ((($a = (($b = self.message, $b !== false && $b !== nil && $b != null ?self.message.$to_s() : $b))) !== false && $a !== nil && $a != null) ? $a : self.$class().$to_s());
+    }, TMP_8.$$arity = 0), nil) && 'to_s';
   })($scope.base, Error);
   (function($base, $super) {
     function $ScriptError(){};
@@ -4798,94 +5141,93 @@ Opal.modules["corelib/error"] = function(Opal) {
       function $EINVAL(){};
       var self = $EINVAL = $klass($base, $super, 'EINVAL', $EINVAL);
 
-      var def = self.$$proto, $scope = self.$$scope, TMP_1;
+      var def = self.$$proto, $scope = self.$$scope, TMP_9;
 
-      return (Opal.defs(self, '$new', TMP_1 = function() {
-        var self = this, $iter = TMP_1.$$p, $yield = $iter || nil;
+      return (Opal.defs(self, '$new', TMP_9 = function() {
+        var $a, $b, self = this, $iter = TMP_9.$$p, $yield = $iter || nil;
 
-        TMP_1.$$p = null;
-        return Opal.find_super_dispatcher(self, 'new', TMP_1, null, $EINVAL).apply(self, ["Invalid argument"]);
-      }), nil) && 'new'
+        TMP_9.$$p = null;
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'new', TMP_9, false, $EINVAL)), $a.$$p = null, $a).call($b, "Invalid argument");
+      }, TMP_9.$$arity = 0), nil) && 'new'
     })($scope.base, $scope.get('SystemCallError'))
   })($scope.base);
   (function($base, $super) {
     function $UncaughtThrowError(){};
     var self = $UncaughtThrowError = $klass($base, $super, 'UncaughtThrowError', $UncaughtThrowError);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_2;
+    var def = self.$$proto, $scope = self.$$scope, TMP_10;
 
     def.sym = nil;
     self.$attr_reader("sym", "arg");
 
-    return (Opal.defn(self, '$initialize', TMP_2 = function(args) {
-      var $a, self = this, $iter = TMP_2.$$p, $yield = $iter || nil;
+    return (Opal.defn(self, '$initialize', TMP_10 = function ːinitialize(args) {
+      var $a, $b, self = this, $iter = TMP_10.$$p, $yield = $iter || nil;
 
-      TMP_2.$$p = null;
+      TMP_10.$$p = null;
       self.sym = args['$[]'](0);
-      if ((($a = $rb_gt(args.$length(), 1)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_gt(args.$length(), 1)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.arg = args['$[]'](1)};
-      return Opal.find_super_dispatcher(self, 'initialize', TMP_2, null).apply(self, ["uncaught throw " + (self.sym.$inspect())]);
-    }), nil) && 'initialize';
+      return ($a = ($b = self, Opal.find_super_dispatcher(self, 'initialize', TMP_10, false)), $a.$$p = null, $a).call($b, "uncaught throw " + (self.sym.$inspect()));
+    }, TMP_10.$$arity = 1), nil) && 'initialize';
   })($scope.base, $scope.get('ArgumentError'));
   (function($base, $super) {
     function $NameError(){};
     var self = $NameError = $klass($base, $super, 'NameError', $NameError);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_3;
+    var def = self.$$proto, $scope = self.$$scope, TMP_11;
 
     self.$attr_reader("name");
 
-    return (Opal.defn(self, '$initialize', TMP_3 = function(message, name) {
-      var self = this, $iter = TMP_3.$$p, $yield = $iter || nil;
+    return (Opal.defn(self, '$initialize', TMP_11 = function ːinitialize(message, name) {
+      var $a, $b, self = this, $iter = TMP_11.$$p, $yield = $iter || nil;
 
       if (name == null) {
-        name = nil
+        name = nil;
       }
-      TMP_3.$$p = null;
-      Opal.find_super_dispatcher(self, 'initialize', TMP_3, null).apply(self, [message]);
+      TMP_11.$$p = null;
+      ($a = ($b = self, Opal.find_super_dispatcher(self, 'initialize', TMP_11, false)), $a.$$p = null, $a).call($b, message);
       return self.name = name;
-    }), nil) && 'initialize';
+    }, TMP_11.$$arity = -2), nil) && 'initialize';
   })($scope.base, null);
   return (function($base, $super) {
     function $NoMethodError(){};
     var self = $NoMethodError = $klass($base, $super, 'NoMethodError', $NoMethodError);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_4;
+    var def = self.$$proto, $scope = self.$$scope, TMP_12;
 
     self.$attr_reader("args");
 
-    return (Opal.defn(self, '$initialize', TMP_4 = function(message, name, args) {
-      var self = this, $iter = TMP_4.$$p, $yield = $iter || nil;
+    return (Opal.defn(self, '$initialize', TMP_12 = function ːinitialize(message, name, args) {
+      var $a, $b, self = this, $iter = TMP_12.$$p, $yield = $iter || nil;
 
-      if (args == null) {
-        args = []
+      if (name == null) {
+        name = nil;
       }
-      TMP_4.$$p = null;
-      Opal.find_super_dispatcher(self, 'initialize', TMP_4, null).apply(self, [message, name]);
+      if (args == null) {
+        args = [];
+      }
+      TMP_12.$$p = null;
+      ($a = ($b = self, Opal.find_super_dispatcher(self, 'initialize', TMP_12, false)), $a.$$p = null, $a).call($b, message, name);
       return self.args = args;
-    }), nil) && 'initialize';
+    }, TMP_12.$$arity = -2), nil) && 'initialize';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/constants"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
 
   Opal.cdecl($scope, 'RUBY_PLATFORM', "opal");
   Opal.cdecl($scope, 'RUBY_ENGINE', "opal");
   Opal.cdecl($scope, 'RUBY_VERSION', "2.2.3");
-  Opal.cdecl($scope, 'RUBY_ENGINE_VERSION', "0.9.2");
-  Opal.cdecl($scope, 'RUBY_RELEASE_DATE', "2016-01-10");
+  Opal.cdecl($scope, 'RUBY_ENGINE_VERSION', "0.10.1");
+  Opal.cdecl($scope, 'RUBY_RELEASE_DATE', "2016-07-06");
   Opal.cdecl($scope, 'RUBY_PATCHLEVEL', 0);
   Opal.cdecl($scope, 'RUBY_REVISION', 0);
   Opal.cdecl($scope, 'RUBY_COPYRIGHT', "opal - Copyright (C) 2013-2015 Adam Beynon");
   return Opal.cdecl($scope, 'RUBY_DESCRIPTION', "opal " + ($scope.get('RUBY_ENGINE_VERSION')) + " (" + ($scope.get('RUBY_RELEASE_DATE')) + " revision " + ($scope.get('RUBY_REVISION')) + ")");
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["opal/base"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
 
   Opal.add_stubs(['$require']);
@@ -4898,10 +5240,8 @@ Opal.modules["opal/base"] = function(Opal) {
   self.$require("corelib/error");
   return self.$require("corelib/constants");
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/nil"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -4912,134 +5252,132 @@ Opal.modules["corelib/nil"] = function(Opal) {
     function $NilClass(){};
     var self = $NilClass = $klass($base, $super, 'NilClass', $NilClass);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18;
 
     def.$$meta = self;
 
-    Opal.defn(self, '$!', function() {
+    Opal.defn(self, '$!', TMP_1 = function() {
       var self = this;
 
       return true;
-    });
+    }, TMP_1.$$arity = 0);
 
-    Opal.defn(self, '$&', function(other) {
+    Opal.defn(self, '$&', TMP_2 = function(other) {
       var self = this;
 
       return false;
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defn(self, '$|', function(other) {
+    Opal.defn(self, '$|', TMP_3 = function(other) {
       var self = this;
 
       return other !== false && other !== nil;
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$^', function(other) {
+    Opal.defn(self, '$^', TMP_4 = function(other) {
       var self = this;
 
       return other !== false && other !== nil;
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_5 = function(other) {
       var self = this;
 
       return other === nil;
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_6 = function ːdup() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't dup " + (self.$class()));
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$clone', function() {
+    Opal.defn(self, '$clone', TMP_7 = function ːclone() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't clone " + (self.$class()));
-    });
+    }, TMP_7.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_8 = function ːinspect() {
       var self = this;
 
       return "nil";
-    });
+    }, TMP_8.$$arity = 0);
 
-    Opal.defn(self, '$nil?', function() {
+    Opal.defn(self, '$nil?', TMP_9 = function() {
       var self = this;
 
       return true;
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$singleton_class', function() {
+    Opal.defn(self, '$singleton_class', TMP_10 = function ːsingleton_class() {
       var self = this;
 
       return $scope.get('NilClass');
-    });
+    }, TMP_10.$$arity = 0);
 
-    Opal.defn(self, '$to_a', function() {
+    Opal.defn(self, '$to_a', TMP_11 = function ːto_a() {
       var self = this;
 
       return [];
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$to_h', function() {
+    Opal.defn(self, '$to_h', TMP_12 = function ːto_h() {
       var self = this;
 
       return Opal.hash();
-    });
+    }, TMP_12.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function() {
+    Opal.defn(self, '$to_i', TMP_13 = function ːto_i() {
       var self = this;
 
       return 0;
-    });
+    }, TMP_13.$$arity = 0);
 
     Opal.alias(self, 'to_f', 'to_i');
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_14 = function ːto_s() {
       var self = this;
 
       return "";
-    });
+    }, TMP_14.$$arity = 0);
 
-    Opal.defn(self, '$to_c', function() {
+    Opal.defn(self, '$to_c', TMP_15 = function ːto_c() {
       var self = this;
 
       return $scope.get('Complex').$new(0, 0);
-    });
+    }, TMP_15.$$arity = 0);
 
-    Opal.defn(self, '$rationalize', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defn(self, '$rationalize', TMP_16 = function ːrationalize($a_rest) {
+      var $b, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      if ((($a = $rb_gt(args.$length(), 1)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = $rb_gt(args.$length(), 1)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         self.$raise($scope.get('ArgumentError'))};
       return self.$Rational(0, 1);
-    });
+    }, TMP_16.$$arity = -1);
 
-    Opal.defn(self, '$to_r', function() {
+    Opal.defn(self, '$to_r', TMP_17 = function ːto_r() {
       var self = this;
 
       return self.$Rational(0, 1);
-    });
+    }, TMP_17.$$arity = 0);
 
-    return (Opal.defn(self, '$instance_variables', function() {
+    return (Opal.defn(self, '$instance_variables', TMP_18 = function ːinstance_variables() {
       var self = this;
 
       return [];
-    }), nil) && 'instance_variables';
+    }, TMP_18.$$arity = 0), nil) && 'instance_variables';
   })($scope.base, null);
   return Opal.cdecl($scope, 'NIL', nil);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/boolean"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$raise', '$class']);
@@ -5047,87 +5385,85 @@ Opal.modules["corelib/boolean"] = function(Opal) {
     function $Boolean(){};
     var self = $Boolean = $klass($base, $super, 'Boolean', $Boolean);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10;
 
     def.$$is_boolean = true;
 
     def.$$meta = self;
 
-    Opal.defn(self, '$__id__', function() {
+    Opal.defn(self, '$__id__', TMP_1 = function ː__id__() {
       var self = this;
 
       return self.valueOf() ? 2 : 0;
-    });
+    }, TMP_1.$$arity = 0);
 
     Opal.alias(self, 'object_id', '__id__');
 
-    Opal.defn(self, '$!', function() {
+    Opal.defn(self, '$!', TMP_2 = function() {
       var self = this;
 
       return self != true;
-    });
+    }, TMP_2.$$arity = 0);
 
-    Opal.defn(self, '$&', function(other) {
+    Opal.defn(self, '$&', TMP_3 = function(other) {
       var self = this;
 
       return (self == true) ? (other !== false && other !== nil) : false;
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$|', function(other) {
+    Opal.defn(self, '$|', TMP_4 = function(other) {
       var self = this;
 
       return (self == true) ? true : (other !== false && other !== nil);
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$^', function(other) {
+    Opal.defn(self, '$^', TMP_5 = function(other) {
       var self = this;
 
       return (self == true) ? (other === false || other === nil) : (other !== false && other !== nil);
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_6 = function(other) {
       var self = this;
 
       return (self == true) === other.valueOf();
-    });
+    }, TMP_6.$$arity = 1);
 
     Opal.alias(self, 'equal?', '==');
 
     Opal.alias(self, 'eql?', '==');
 
-    Opal.defn(self, '$singleton_class', function() {
+    Opal.defn(self, '$singleton_class', TMP_7 = function ːsingleton_class() {
       var self = this;
 
       return $scope.get('Boolean');
-    });
+    }, TMP_7.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_8 = function ːto_s() {
       var self = this;
 
       return (self == true) ? 'true' : 'false';
-    });
+    }, TMP_8.$$arity = 0);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_9 = function ːdup() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't dup " + (self.$class()));
-    });
+    }, TMP_9.$$arity = 0);
 
-    return (Opal.defn(self, '$clone', function() {
+    return (Opal.defn(self, '$clone', TMP_10 = function ːclone() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't clone " + (self.$class()));
-    }), nil) && 'clone';
+    }, TMP_10.$$arity = 0), nil) && 'clone';
   })($scope.base, Boolean);
   Opal.cdecl($scope, 'TrueClass', $scope.get('Boolean'));
   Opal.cdecl($scope, 'FalseClass', $scope.get('Boolean'));
   Opal.cdecl($scope, 'TRUE', true);
   return Opal.cdecl($scope, 'FALSE', false);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/comparable"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -5140,25 +5476,25 @@ Opal.modules["corelib/comparable"] = function(Opal) {
   return (function($base) {
     var $Comparable, self = $Comparable = $module($base, 'Comparable');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7;
 
-    Opal.defs(self, '$normalize', function(what) {
+    Opal.defs(self, '$normalize', TMP_1 = function ːnormalize(what) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](what)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](what)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return what};
-      if ((($a = $rb_gt(what, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_gt(what, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return 1};
-      if ((($a = $rb_lt(what, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_lt(what, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return -1};
       return 0;
-    });
+    }, TMP_1.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_2 = function(other) {
       var $a, self = this, cmp = nil;
 
       try {
-      if ((($a = self['$equal?'](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = self['$equal?'](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return true};
         
       if (self["$<=>"] == Opal.Kernel["$<=>"]) {
@@ -5171,62 +5507,61 @@ Opal.modules["corelib/comparable"] = function(Opal) {
         return false;
       }
     
-        if ((($a = cmp = (self['$<=>'](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = cmp = (self['$<=>'](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           } else {
           return false
         };
         return $scope.get('Comparable').$normalize(cmp) == 0;
-      } catch ($err) {if (Opal.rescue($err, [$scope.get('StandardError')])) {
-        try {
-          return false
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('StandardError')])) {
+          try {
+            return false
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
       };
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defn(self, '$>', function(other) {
+    Opal.defn(self, '$>', TMP_3 = function(other) {
       var $a, self = this, cmp = nil;
 
-      if ((($a = cmp = (self['$<=>'](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = cmp = (self['$<=>'](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")
       };
       return $scope.get('Comparable').$normalize(cmp) > 0;
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$>=', function(other) {
+    Opal.defn(self, '$>=', TMP_4 = function(other) {
       var $a, self = this, cmp = nil;
 
-      if ((($a = cmp = (self['$<=>'](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = cmp = (self['$<=>'](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")
       };
       return $scope.get('Comparable').$normalize(cmp) >= 0;
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$<', function(other) {
+    Opal.defn(self, '$<', TMP_5 = function(other) {
       var $a, self = this, cmp = nil;
 
-      if ((($a = cmp = (self['$<=>'](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = cmp = (self['$<=>'](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")
       };
       return $scope.get('Comparable').$normalize(cmp) < 0;
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$<=', function(other) {
+    Opal.defn(self, '$<=', TMP_6 = function(other) {
       var $a, self = this, cmp = nil;
 
-      if ((($a = cmp = (self['$<=>'](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = cmp = (self['$<=>'](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")
       };
       return $scope.get('Comparable').$normalize(cmp) <= 0;
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$between?', function(min, max) {
+    Opal.defn(self, '$between?', TMP_7 = function(min, max) {
       var self = this;
 
       if ($rb_lt(self, min)) {
@@ -5234,13 +5569,11 @@ Opal.modules["corelib/comparable"] = function(Opal) {
       if ($rb_gt(self, max)) {
         return false};
       return true;
-    });
+    }, TMP_7.$$arity = 2);
   })($scope.base)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/regexp"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $gvars = Opal.gvars;
 
   Opal.add_stubs(['$nil?', '$[]', '$raise', '$escape', '$options', '$to_str', '$new', '$join', '$coerce_to!', '$!', '$match', '$coerce_to?', '$begin', '$coerce_to', '$call', '$=~', '$attr_reader', '$===', '$inspect', '$to_a']);
@@ -5256,7 +5589,7 @@ Opal.modules["corelib/regexp"] = function(Opal) {
     function $Regexp(){};
     var self = $Regexp = $klass($base, $super, 'Regexp', $Regexp);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_2;
+    var def = self.$$proto, $scope = self.$$scope, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15;
 
     Opal.cdecl($scope, 'IGNORECASE', 1);
 
@@ -5265,21 +5598,22 @@ Opal.modules["corelib/regexp"] = function(Opal) {
     def.$$is_regexp = true;
 
     (function(self) {
-      var $scope = self.$$scope, def = self.$$proto, TMP_1;
+      var $scope = self.$$scope, def = self.$$proto, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5;
 
-      Opal.defn(self, '$allocate', TMP_1 = function() {
-        var self = this, $iter = TMP_1.$$p, $yield = $iter || nil, allocated = nil, $zuper = nil, $zuper_index = nil;
+      Opal.defn(self, '$allocate', TMP_1 = function ːallocate() {
+        var $a, $b, self = this, $iter = TMP_1.$$p, $yield = $iter || nil, allocated = nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
         TMP_1.$$p = null;
         $zuper = [];
+        
         for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
           $zuper[$zuper_index] = arguments[$zuper_index];
         }
-        allocated = Opal.find_super_dispatcher(self, 'allocate', TMP_1, $iter).apply(self, $zuper);
+        allocated = ($a = ($b = self, Opal.find_super_dispatcher(self, 'allocate', TMP_1, false)), $a.$$p = $iter, $a).apply($b, $zuper);
         allocated.uninitialized = true;
         return allocated;
-      });
-      Opal.defn(self, '$escape', function(string) {
+      }, TMP_1.$$arity = 0);
+      Opal.defn(self, '$escape', TMP_2 = function ːescape(string) {
         var self = this;
 
         
@@ -5289,29 +5623,29 @@ Opal.modules["corelib/regexp"] = function(Opal) {
                      .replace(/[\f]/g, '\\f')
                      .replace(/[\t]/g, '\\t');
       
-      });
-      Opal.defn(self, '$last_match', function(n) {
+      }, TMP_2.$$arity = 1);
+      Opal.defn(self, '$last_match', TMP_3 = function ːlast_match(n) {
         var $a, self = this;
         if ($gvars["~"] == null) $gvars["~"] = nil;
 
         if (n == null) {
-          n = nil
+          n = nil;
         }
-        if ((($a = n['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = n['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return $gvars["~"]
           } else {
           return $gvars["~"]['$[]'](n)
         };
-      });
+      }, TMP_3.$$arity = -1);
       Opal.alias(self, 'quote', 'escape');
-      Opal.defn(self, '$union', function() {
-        var self = this, $splat_index = nil;
+      Opal.defn(self, '$union', TMP_4 = function ːunion($a_rest) {
+        var self = this, parts;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var parts = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          parts[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        parts = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          parts[$arg_idx - 0] = arguments[$arg_idx];
         }
         
         var is_first_part_array, quoted_validated, part, options, each_part_options;
@@ -5348,8 +5682,8 @@ Opal.modules["corelib/regexp"] = function(Opal) {
         }
       
         return self.$new((quoted_validated).$join("|"), options);
-      });
-      return (Opal.defn(self, '$new', function(regexp, options) {
+      }, TMP_4.$$arity = -1);
+      return (Opal.defn(self, '$new', TMP_5 = function(regexp, options) {
         var self = this;
 
         
@@ -5359,7 +5693,7 @@ Opal.modules["corelib/regexp"] = function(Opal) {
 
         regexp = $scope.get('Opal')['$coerce_to!'](regexp, $scope.get('String'), "to_str");
 
-        if (regexp.charAt(regexp.length - 1) === '\\') {
+        if (regexp.charAt(regexp.length - 1) === '\\' && regexp.charAt(regexp.length - 2) !== '\\') {
           self.$raise($scope.get('RegexpError'), "too short escape sequence: /" + (regexp) + "/")
         }
 
@@ -5379,41 +5713,41 @@ Opal.modules["corelib/regexp"] = function(Opal) {
 
         return new RegExp(regexp, options);
       ;
-      }), nil) && 'new';
+      }, TMP_5.$$arity = -2), nil) && 'new';
     })(Opal.get_singleton_class(self));
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_6 = function(other) {
       var self = this;
 
       return other.constructor == RegExp && self.toString() === other.toString();
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$===', function(string) {
+    Opal.defn(self, '$===', TMP_7 = function(string) {
       var self = this;
 
       return self.$match($scope.get('Opal')['$coerce_to?'](string, $scope.get('String'), "to_str")) !== nil;
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$=~', function(string) {
+    Opal.defn(self, '$=~', TMP_8 = function(string) {
       var $a, self = this;
       if ($gvars["~"] == null) $gvars["~"] = nil;
 
-      return ($a = self.$match(string), $a !== false && $a !== nil ?$gvars["~"].$begin(0) : $a);
-    });
+      return ($a = self.$match(string), $a !== false && $a !== nil && $a != null ?$gvars["~"].$begin(0) : $a);
+    }, TMP_8.$$arity = 1);
 
     Opal.alias(self, 'eql?', '==');
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_9 = function ːinspect() {
       var self = this;
 
       return self.toString();
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$match', TMP_2 = function(string, pos) {
-      var self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$match', TMP_10 = function ːmatch(string, pos) {
+      var self = this, $iter = TMP_10.$$p, block = $iter || nil;
       if ($gvars["~"] == null) $gvars["~"] = nil;
 
-      TMP_2.$$p = null;
+      TMP_10.$$p = null;
       
       if (self.uninitialized) {
         self.$raise($scope.get('TypeError'), "uninitialized Regexp")
@@ -5461,22 +5795,22 @@ Opal.modules["corelib/regexp"] = function(Opal) {
         re.lastIndex = md.index + 1;
       }
     ;
-    });
+    }, TMP_10.$$arity = -2);
 
-    Opal.defn(self, '$~', function() {
+    Opal.defn(self, '$~', TMP_11 = function() {
       var self = this;
       if ($gvars._ == null) $gvars._ = nil;
 
       return self['$=~']($gvars._);
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$source', function() {
+    Opal.defn(self, '$source', TMP_12 = function ːsource() {
       var self = this;
 
       return self.source;
-    });
+    }, TMP_12.$$arity = 0);
 
-    Opal.defn(self, '$options', function() {
+    Opal.defn(self, '$options', TMP_13 = function ːoptions() {
       var self = this;
 
       
@@ -5493,26 +5827,32 @@ Opal.modules["corelib/regexp"] = function(Opal) {
       }
       return result;
     ;
-    });
+    }, TMP_13.$$arity = 0);
 
-    Opal.defn(self, '$casefold?', function() {
+    Opal.defn(self, '$casefold?', TMP_14 = function() {
       var self = this;
 
       return self.ignoreCase;
-    });
+    }, TMP_14.$$arity = 0);
 
-    return Opal.alias(self, 'to_s', 'source');
+    Opal.alias(self, 'to_s', 'source');
+
+    return (Opal.defs(self, '$_load', TMP_15 = function ː_load(args) {
+      var $a, self = this;
+
+      return ($a = self).$new.apply($a, Opal.to_a(args));
+    }, TMP_15.$$arity = 1), nil) && '_load';
   })($scope.base, RegExp);
   return (function($base, $super) {
     function $MatchData(){};
     var self = $MatchData = $klass($base, $super, 'MatchData', $MatchData);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27;
 
     def.matches = nil;
     self.$attr_reader("post_match", "pre_match", "regexp", "string");
 
-    Opal.defn(self, '$initialize', function(regexp, match_groups) {
+    Opal.defn(self, '$initialize', TMP_16 = function ːinitialize(regexp, match_groups) {
       var self = this;
 
       $gvars["~"] = self;
@@ -5534,21 +5874,21 @@ Opal.modules["corelib/regexp"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_16.$$arity = 2);
 
-    Opal.defn(self, '$[]', function() {
-      var $a, self = this, $splat_index = nil;
+    Opal.defn(self, '$[]', TMP_17 = function($a_rest) {
+      var $b, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      return ($a = self.matches)['$[]'].apply($a, Opal.to_a(args));
-    });
+      return ($b = self.matches)['$[]'].apply($b, Opal.to_a(args));
+    }, TMP_17.$$arity = -1);
 
-    Opal.defn(self, '$offset', function(n) {
+    Opal.defn(self, '$offset', TMP_18 = function ːoffset(n) {
       var self = this;
 
       
@@ -5557,21 +5897,21 @@ Opal.modules["corelib/regexp"] = function(Opal) {
       }
       return [self.begin, self.begin + self.matches[n].length];
     ;
-    });
+    }, TMP_18.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_19 = function(other) {
       var $a, $b, $c, $d, self = this;
 
-      if ((($a = $scope.get('MatchData')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('MatchData')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return false
       };
-      return ($a = ($b = ($c = ($d = self.string == other.string, $d !== false && $d !== nil ?self.regexp.toString() == other.regexp.toString() : $d), $c !== false && $c !== nil ?self.pre_match == other.pre_match : $c), $b !== false && $b !== nil ?self.post_match == other.post_match : $b), $a !== false && $a !== nil ?self.begin == other.begin : $a);
-    });
+      return ($a = ($b = ($c = ($d = self.string == other.string, $d !== false && $d !== nil && $d != null ?self.regexp.toString() == other.regexp.toString() : $d), $c !== false && $c !== nil && $c != null ?self.pre_match == other.pre_match : $c), $b !== false && $b !== nil && $b != null ?self.post_match == other.post_match : $b), $a !== false && $a !== nil && $a != null ?self.begin == other.begin : $a);
+    }, TMP_19.$$arity = 1);
 
     Opal.alias(self, 'eql?', '==');
 
-    Opal.defn(self, '$begin', function(n) {
+    Opal.defn(self, '$begin', TMP_20 = function ːbegin(n) {
       var self = this;
 
       
@@ -5580,9 +5920,9 @@ Opal.modules["corelib/regexp"] = function(Opal) {
       }
       return self.begin;
     ;
-    });
+    }, TMP_20.$$arity = 1);
 
-    Opal.defn(self, '$end', function(n) {
+    Opal.defn(self, '$end', TMP_21 = function ːend(n) {
       var self = this;
 
       
@@ -5591,15 +5931,15 @@ Opal.modules["corelib/regexp"] = function(Opal) {
       }
       return self.begin + self.matches[n].length;
     ;
-    });
+    }, TMP_21.$$arity = 1);
 
-    Opal.defn(self, '$captures', function() {
+    Opal.defn(self, '$captures', TMP_22 = function ːcaptures() {
       var self = this;
 
       return self.matches.slice(1);
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_23 = function ːinspect() {
       var self = this;
 
       
@@ -5611,36 +5951,36 @@ Opal.modules["corelib/regexp"] = function(Opal) {
 
       return str + ">";
     ;
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$length', function() {
+    Opal.defn(self, '$length', TMP_24 = function ːlength() {
       var self = this;
 
       return self.matches.length;
-    });
+    }, TMP_24.$$arity = 0);
 
     Opal.alias(self, 'size', 'length');
 
-    Opal.defn(self, '$to_a', function() {
+    Opal.defn(self, '$to_a', TMP_25 = function ːto_a() {
       var self = this;
 
       return self.matches;
-    });
+    }, TMP_25.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_26 = function ːto_s() {
       var self = this;
 
       return self.matches[0];
-    });
+    }, TMP_26.$$arity = 0);
 
-    return (Opal.defn(self, '$values_at', function() {
-      var self = this, $splat_index = nil;
+    return (Opal.defn(self, '$values_at', TMP_27 = function ːvalues_at($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var i, a, index, values = [];
@@ -5668,13 +6008,11 @@ Opal.modules["corelib/regexp"] = function(Opal) {
 
       return values;
     
-    }), nil) && 'values_at';
+    }, TMP_27.$$arity = -1), nil) && 'values_at';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/string"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_divide(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs / rhs : lhs['$/'](rhs);
   }
@@ -5683,45 +6021,45 @@ Opal.modules["corelib/string"] = function(Opal) {
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $gvars = Opal.gvars;
 
-  Opal.add_stubs(['$require', '$include', '$coerce_to?', '$coerce_to', '$raise', '$===', '$format', '$to_s', '$respond_to?', '$to_str', '$<=>', '$==', '$=~', '$new', '$empty?', '$ljust', '$ceil', '$/', '$+', '$rjust', '$floor', '$to_a', '$each_char', '$to_proc', '$coerce_to!', '$copy_singleton_methods', '$initialize_clone', '$initialize_dup', '$enum_for', '$size', '$chomp', '$[]', '$to_i', '$class', '$each_line', '$match', '$captures', '$proc', '$shift', '$__send__', '$succ', '$escape']);
+  Opal.add_stubs(['$require', '$include', '$coerce_to?', '$coerce_to', '$raise', '$===', '$format', '$to_s', '$respond_to?', '$to_str', '$<=>', '$==', '$=~', '$new', '$empty?', '$ljust', '$ceil', '$/', '$+', '$rjust', '$floor', '$to_a', '$each_char', '$to_proc', '$coerce_to!', '$copy_singleton_methods', '$initialize_clone', '$initialize_dup', '$enum_for', '$size', '$chomp', '$[]', '$to_i', '$each_line', '$class', '$match', '$captures', '$proc', '$shift', '$__send__', '$succ', '$escape']);
   self.$require("corelib/comparable");
   self.$require("corelib/regexp");
   (function($base, $super) {
     function $String(){};
     var self = $String = $klass($base, $super, 'String', $String);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_11;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_36, TMP_37, TMP_38, TMP_39, TMP_40, TMP_41, TMP_42, TMP_43, TMP_44, TMP_45, TMP_46, TMP_47, TMP_48, TMP_49, TMP_50, TMP_51, TMP_52, TMP_53, TMP_54, TMP_55, TMP_56, TMP_57, TMP_58, TMP_59, TMP_61, TMP_62, TMP_63, TMP_64, TMP_65, TMP_66, TMP_67, TMP_68;
 
     def.length = nil;
     self.$include($scope.get('Comparable'));
 
     def.$$is_string = true;
 
-    Opal.defn(self, '$__id__', function() {
+    Opal.defn(self, '$__id__', TMP_1 = function ː__id__() {
       var self = this;
 
       return self.toString();
-    });
+    }, TMP_1.$$arity = 0);
 
     Opal.alias(self, 'object_id', '__id__');
 
-    Opal.defs(self, '$try_convert', function(what) {
+    Opal.defs(self, '$try_convert', TMP_2 = function ːtry_convert(what) {
       var self = this;
 
       return $scope.get('Opal')['$coerce_to?'](what, $scope.get('String'), "to_str");
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defs(self, '$new', function(str) {
+    Opal.defs(self, '$new', TMP_3 = function(str) {
       var self = this;
 
       if (str == null) {
-        str = ""
+        str = "";
       }
       str = $scope.get('Opal').$coerce_to(str, $scope.get('String'), "to_str");
       return new String(str);
-    });
+    }, TMP_3.$$arity = -1);
 
-    Opal.defn(self, '$initialize', function(str) {
+    Opal.defn(self, '$initialize', TMP_4 = function ːinitialize(str) {
       var self = this;
 
       
@@ -5730,19 +6068,19 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
     
       return self.$raise($scope.get('NotImplementedError'), "Mutable strings are not supported in Opal.");
-    });
+    }, TMP_4.$$arity = -1);
 
-    Opal.defn(self, '$%', function(data) {
+    Opal.defn(self, '$%', TMP_5 = function(data) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](data)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](data)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return ($a = self).$format.apply($a, [self].concat(Opal.to_a(data)))
         } else {
         return self.$format(self, data)
       };
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$*', function(count) {
+    Opal.defn(self, '$*', TMP_6 = function(count) {
       var self = this;
 
       
@@ -5780,19 +6118,19 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return result;
     ;
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_7 = function(other) {
       var self = this;
 
       other = $scope.get('Opal').$coerce_to(other, $scope.get('String'), "to_str");
       return self + other.$to_s();
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_8 = function(other) {
       var $a, self = this;
 
-      if ((($a = other['$respond_to?']("to_str")) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other['$respond_to?']("to_str")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_str().$to_s();
         return self > other ? 1 : (self < other ? -1 : 0);
         } else {
@@ -5807,9 +6145,9 @@ Opal.modules["corelib/string"] = function(Opal) {
         }
       ;
       };
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_9 = function(other) {
       var self = this;
 
       
@@ -5821,13 +6159,13 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
       return false;
     ;
-    });
+    }, TMP_9.$$arity = 1);
 
     Opal.alias(self, 'eql?', '==');
 
     Opal.alias(self, '===', '==');
 
-    Opal.defn(self, '$=~', function(other) {
+    Opal.defn(self, '$=~', TMP_10 = function(other) {
       var self = this;
 
       
@@ -5837,9 +6175,9 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return other['$=~'](self);
     ;
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defn(self, '$[]', function(index, length) {
+    Opal.defn(self, '$[]', TMP_11 = function(index, length) {
       var self = this;
 
       
@@ -5937,17 +6275,17 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return self.substr(index, length);
     
-    });
+    }, TMP_11.$$arity = -2);
 
     Opal.alias(self, 'byteslice', '[]');
 
-    Opal.defn(self, '$capitalize', function() {
+    Opal.defn(self, '$capitalize', TMP_12 = function ːcapitalize() {
       var self = this;
 
       return self.charAt(0).toUpperCase() + self.substr(1).toLowerCase();
-    });
+    }, TMP_12.$$arity = 0);
 
-    Opal.defn(self, '$casecmp', function(other) {
+    Opal.defn(self, '$casecmp', TMP_13 = function ːcasecmp(other) {
       var self = this;
 
       other = $scope.get('Opal').$coerce_to(other, $scope.get('String'), "to_str").$to_s();
@@ -5959,19 +6297,19 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
     
       return self['$<=>'](other);
-    });
+    }, TMP_13.$$arity = 1);
 
-    Opal.defn(self, '$center', function(width, padstr) {
+    Opal.defn(self, '$center', TMP_14 = function ːcenter(width, padstr) {
       var $a, self = this;
 
       if (padstr == null) {
-        padstr = " "
+        padstr = " ";
       }
       width = $scope.get('Opal').$coerce_to(width, $scope.get('Integer'), "to_int");
       padstr = $scope.get('Opal').$coerce_to(padstr, $scope.get('String'), "to_str").$to_s();
-      if ((($a = padstr['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = padstr['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "zero width padding")};
-      if ((($a = width <= self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = width <= self.length) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self};
       
       var ljustified = self.$ljust($rb_divide(($rb_plus(width, self.length)), 2).$ceil(), padstr),
@@ -5979,27 +6317,27 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return rjustified + ljustified.slice(self.length);
     ;
-    });
+    }, TMP_14.$$arity = -2);
 
-    Opal.defn(self, '$chars', TMP_1 = function() {
-      var $a, $b, self = this, $iter = TMP_1.$$p, block = $iter || nil;
+    Opal.defn(self, '$chars', TMP_15 = function ːchars() {
+      var $a, $b, self = this, $iter = TMP_15.$$p, block = $iter || nil;
 
-      TMP_1.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_15.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
         return self.$each_char().$to_a()
       };
       return ($a = ($b = self).$each_char, $a.$$p = block.$to_proc(), $a).call($b);
-    });
+    }, TMP_15.$$arity = 0);
 
-    Opal.defn(self, '$chomp', function(separator) {
+    Opal.defn(self, '$chomp', TMP_16 = function ːchomp(separator) {
       var $a, self = this;
       if ($gvars["/"] == null) $gvars["/"] = nil;
 
       if (separator == null) {
-        separator = $gvars["/"]
+        separator = $gvars["/"];
       }
-      if ((($a = separator === nil || self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = separator === nil || self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self};
       separator = $scope.get('Opal')['$coerce_to!'](separator, $scope.get('String'), "to_str").$to_s();
       
@@ -6018,9 +6356,9 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_16.$$arity = -1);
 
-    Opal.defn(self, '$chop', function() {
+    Opal.defn(self, '$chop', TMP_17 = function ːchop() {
       var self = this;
 
       
@@ -6037,39 +6375,39 @@ Opal.modules["corelib/string"] = function(Opal) {
         return self.substr(0, length - 1);
       }
     
-    });
+    }, TMP_17.$$arity = 0);
 
-    Opal.defn(self, '$chr', function() {
+    Opal.defn(self, '$chr', TMP_18 = function ːchr() {
       var self = this;
 
       return self.charAt(0);
-    });
+    }, TMP_18.$$arity = 0);
 
-    Opal.defn(self, '$clone', function() {
+    Opal.defn(self, '$clone', TMP_19 = function ːclone() {
       var self = this, copy = nil;
 
       copy = self.slice();
       copy.$copy_singleton_methods(self);
       copy.$initialize_clone(self);
       return copy;
-    });
+    }, TMP_19.$$arity = 0);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_20 = function ːdup() {
       var self = this, copy = nil;
 
       copy = self.slice();
       copy.$initialize_dup(self);
       return copy;
-    });
+    }, TMP_20.$$arity = 0);
 
-    Opal.defn(self, '$count', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$count', TMP_21 = function ːcount($a_rest) {
+      var self = this, sets;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var sets = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        sets[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      sets = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        sets[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       if (sets.length === 0) {
@@ -6081,16 +6419,16 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
       return self.length - self.replace(new RegExp(char_class, 'g'), '').length;
     ;
-    });
+    }, TMP_21.$$arity = -1);
 
-    Opal.defn(self, '$delete', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$delete', TMP_22 = function($a_rest) {
+      var self = this, sets;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var sets = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        sets[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      sets = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        sets[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       if (sets.length === 0) {
@@ -6102,60 +6440,49 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
       return self.replace(new RegExp(char_class, 'g'), '');
     ;
-    });
+    }, TMP_22.$$arity = -1);
 
-    Opal.defn(self, '$downcase', function() {
+    Opal.defn(self, '$downcase', TMP_23 = function ːdowncase() {
       var self = this;
 
       return self.toLowerCase();
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$each_char', TMP_2 = function() {
-      var $a, $b, TMP_3, self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_char', TMP_24 = function ːeach_char() {
+      var $a, $b, TMP_25, self = this, $iter = TMP_24.$$p, block = $iter || nil;
 
-      TMP_2.$$p = null;
+      TMP_24.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_3 = function(){var self = TMP_3.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_25 = function(){var self = TMP_25.$$s || this;
 
-        return self.$size()}, TMP_3.$$s = self, TMP_3), $a).call($b, "each_char")
+        return self.$size()}, TMP_25.$$s = self, TMP_25.$$arity = 0, TMP_25), $a).call($b, "each_char")
       };
       
       for (var i = 0, length = self.length; i < length; i++) {
-        var value = Opal.yield1(block, self.charAt(i));
-
-        if (value === $breaker) {
-          return $breaker.$v;
-        }
+        Opal.yield1(block, self.charAt(i));
       }
     
       return self;
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$each_line', TMP_4 = function(separator) {
-      var self = this, $iter = TMP_4.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_line', TMP_26 = function ːeach_line(separator) {
+      var self = this, $iter = TMP_26.$$p, block = $iter || nil;
       if ($gvars["/"] == null) $gvars["/"] = nil;
 
       if (separator == null) {
-        separator = $gvars["/"]
+        separator = $gvars["/"];
       }
-      TMP_4.$$p = null;
+      TMP_26.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("each_line", separator)
       };
       
-      var value;
-
       if (separator === nil) {
-        value = Opal.yield1(block, self);
+        Opal.yield1(block, self);
 
-        if (value === $breaker) {
-          return value.$v;
-        }
-        else {
-          return self;
-        }
+        return self;
       }
 
       separator = $scope.get('Opal').$coerce_to(separator, $scope.get('String'), "to_str")
@@ -6165,11 +6492,7 @@ Opal.modules["corelib/string"] = function(Opal) {
       if (separator.length === 0) {
         for (a = self.split(/(\n{2,})/), i = 0, n = a.length; i < n; i += 2) {
           if (a[i] || a[i + 1]) {
-            value = Opal.yield1(block, (a[i] || "") + (a[i + 1] || ""));
-
-            if (value === $breaker) {
-              return value.$v;
-            }
+            Opal.yield1(block, (a[i] || "") + (a[i + 1] || ""));
           }
         }
 
@@ -6182,38 +6505,30 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       for (i = 0, length = splitted.length; i < length; i++) {
         if (i < length - 1 || trailing) {
-          value = Opal.yield1(block, splitted[i] + separator);
-
-          if (value === $breaker) {
-            return value.$v;
-          }
+          Opal.yield1(block, splitted[i] + separator);
         }
         else {
-          value = Opal.yield1(block, splitted[i]);
-
-          if (value === $breaker) {
-            return value.$v;
-          }
+          Opal.yield1(block, splitted[i]);
         }
       }
     
       return self;
-    });
+    }, TMP_26.$$arity = -1);
 
-    Opal.defn(self, '$empty?', function() {
+    Opal.defn(self, '$empty?', TMP_27 = function() {
       var self = this;
 
       return self.length === 0;
-    });
+    }, TMP_27.$$arity = 0);
 
-    Opal.defn(self, '$end_with?', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$end_with?', TMP_28 = function($a_rest) {
+      var self = this, suffixes;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var suffixes = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        suffixes[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      suffixes = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        suffixes[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = 0, length = suffixes.length; i < length; i++) {
@@ -6226,16 +6541,16 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
     
       return false;
-    });
+    }, TMP_28.$$arity = -1);
 
     Opal.alias(self, 'eql?', '==');
 
     Opal.alias(self, 'equal?', '===');
 
-    Opal.defn(self, '$gsub', TMP_5 = function(pattern, replacement) {
-      var self = this, $iter = TMP_5.$$p, block = $iter || nil;
+    Opal.defn(self, '$gsub', TMP_29 = function ːgsub(pattern, replacement) {
+      var self = this, $iter = TMP_29.$$p, block = $iter || nil;
 
-      TMP_5.$$p = null;
+      TMP_29.$$p = null;
       
       if (replacement === undefined && block === nil) {
         return self.$enum_for("gsub", pattern);
@@ -6304,36 +6619,32 @@ Opal.modules["corelib/string"] = function(Opal) {
       $gvars["~"] = match_data
       return result;
     ;
-    });
+    }, TMP_29.$$arity = -2);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_30 = function ːhash() {
       var self = this;
 
       return self.toString();
-    });
+    }, TMP_30.$$arity = 0);
 
-    Opal.defn(self, '$hex', function() {
+    Opal.defn(self, '$hex', TMP_31 = function ːhex() {
       var self = this;
 
       return self.$to_i(16);
-    });
+    }, TMP_31.$$arity = 0);
 
-    Opal.defn(self, '$include?', function(other) {
-      var $a, self = this;
+    Opal.defn(self, '$include?', TMP_32 = function(other) {
+      var self = this;
 
       
-      if (other.$$is_string) {
-        return self.indexOf(other) !== -1;
+      if (!other.$$is_string) {
+        other = $scope.get('Opal').$coerce_to(other, $scope.get('String'), "to_str")
       }
-    
-      if ((($a = other['$respond_to?']("to_str")) !== nil && (!$a.$$is_boolean || $a == true))) {
-        } else {
-        self.$raise($scope.get('TypeError'), "no implicit conversion of " + (other.$class()) + " into String")
-      };
-      return self.indexOf(other.$to_str()) !== -1;
-    });
+      return self.indexOf(other) !== -1;
+    ;
+    }, TMP_32.$$arity = 1);
 
-    Opal.defn(self, '$index', function(search, offset) {
+    Opal.defn(self, '$index', TMP_33 = function ːindex(search, offset) {
       var self = this;
 
       
@@ -6380,9 +6691,9 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return index === -1 ? nil : index;
     
-    });
+    }, TMP_33.$$arity = -2);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_34 = function ːinspect() {
       var self = this;
 
       
@@ -6404,47 +6715,47 @@ Opal.modules["corelib/string"] = function(Opal) {
           });
       return '"' + escaped.replace(/\#[\$\@\{]/g, '\\$&') + '"';
     
-    });
+    }, TMP_34.$$arity = 0);
 
-    Opal.defn(self, '$intern', function() {
+    Opal.defn(self, '$intern', TMP_35 = function ːintern() {
       var self = this;
 
       return self;
-    });
+    }, TMP_35.$$arity = 0);
 
-    Opal.defn(self, '$lines', TMP_6 = function(separator) {
-      var $a, $b, self = this, $iter = TMP_6.$$p, block = $iter || nil, e = nil;
+    Opal.defn(self, '$lines', TMP_36 = function ːlines(separator) {
+      var $a, $b, self = this, $iter = TMP_36.$$p, block = $iter || nil, e = nil;
       if ($gvars["/"] == null) $gvars["/"] = nil;
 
       if (separator == null) {
-        separator = $gvars["/"]
+        separator = $gvars["/"];
       }
-      TMP_6.$$p = null;
+      TMP_36.$$p = null;
       e = ($a = ($b = self).$each_line, $a.$$p = block.$to_proc(), $a).call($b, separator);
-      if (block !== false && block !== nil) {
+      if (block !== false && block !== nil && block != null) {
         return self
         } else {
         return e.$to_a()
       };
-    });
+    }, TMP_36.$$arity = -1);
 
-    Opal.defn(self, '$length', function() {
+    Opal.defn(self, '$length', TMP_37 = function ːlength() {
       var self = this;
 
       return self.length;
-    });
+    }, TMP_37.$$arity = 0);
 
-    Opal.defn(self, '$ljust', function(width, padstr) {
+    Opal.defn(self, '$ljust', TMP_38 = function ːljust(width, padstr) {
       var $a, self = this;
 
       if (padstr == null) {
-        padstr = " "
+        padstr = " ";
       }
       width = $scope.get('Opal').$coerce_to(width, $scope.get('Integer'), "to_int");
       padstr = $scope.get('Opal').$coerce_to(padstr, $scope.get('String'), "to_str").$to_s();
-      if ((($a = padstr['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = padstr['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "zero width padding")};
-      if ((($a = width <= self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = width <= self.length) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self};
       
       var index  = -1,
@@ -6458,28 +6769,28 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return self + result.slice(0, width);
     
-    });
+    }, TMP_38.$$arity = -2);
 
-    Opal.defn(self, '$lstrip', function() {
+    Opal.defn(self, '$lstrip', TMP_39 = function ːlstrip() {
       var self = this;
 
       return self.replace(/^\s*/, '');
-    });
+    }, TMP_39.$$arity = 0);
 
-    Opal.defn(self, '$match', TMP_7 = function(pattern, pos) {
-      var $a, $b, self = this, $iter = TMP_7.$$p, block = $iter || nil;
+    Opal.defn(self, '$match', TMP_40 = function ːmatch(pattern, pos) {
+      var $a, $b, self = this, $iter = TMP_40.$$p, block = $iter || nil;
 
-      TMP_7.$$p = null;
-      if ((($a = ((($b = $scope.get('String')['$==='](pattern)) !== false && $b !== nil) ? $b : pattern['$respond_to?']("to_str"))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_40.$$p = null;
+      if ((($a = ((($b = $scope.get('String')['$==='](pattern)) !== false && $b !== nil && $b != null) ? $b : pattern['$respond_to?']("to_str"))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         pattern = $scope.get('Regexp').$new(pattern.$to_str())};
-      if ((($a = $scope.get('Regexp')['$==='](pattern)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Regexp')['$==='](pattern)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "wrong argument type " + (pattern.$class()) + " (expected Regexp)")
       };
       return ($a = ($b = pattern).$match, $a.$$p = block.$to_proc(), $a).call($b, self, pos);
-    });
+    }, TMP_40.$$arity = -2);
 
-    Opal.defn(self, '$next', function() {
+    Opal.defn(self, '$next', TMP_41 = function ːnext() {
       var self = this;
 
       
@@ -6549,9 +6860,9 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
       return result;
     
-    });
+    }, TMP_41.$$arity = 0);
 
-    Opal.defn(self, '$oct', function() {
+    Opal.defn(self, '$oct', TMP_42 = function ːoct() {
       var self = this;
 
       
@@ -6594,15 +6905,15 @@ Opal.modules["corelib/string"] = function(Opal) {
       result = parseInt(string.replace(/_(?!_)/g, ''), radix);
       return isNaN(result) ? 0 : result;
     
-    });
+    }, TMP_42.$$arity = 0);
 
-    Opal.defn(self, '$ord', function() {
+    Opal.defn(self, '$ord', TMP_43 = function ːord() {
       var self = this;
 
       return self.charCodeAt(0);
-    });
+    }, TMP_43.$$arity = 0);
 
-    Opal.defn(self, '$partition', function(sep) {
+    Opal.defn(self, '$partition', TMP_44 = function ːpartition(sep) {
       var self = this;
 
       
@@ -6632,15 +6943,15 @@ Opal.modules["corelib/string"] = function(Opal) {
         self.slice(i + sep.length)
       ];
     
-    });
+    }, TMP_44.$$arity = 1);
 
-    Opal.defn(self, '$reverse', function() {
+    Opal.defn(self, '$reverse', TMP_45 = function ːreverse() {
       var self = this;
 
       return self.split('').reverse().join('');
-    });
+    }, TMP_45.$$arity = 0);
 
-    Opal.defn(self, '$rindex', function(search, offset) {
+    Opal.defn(self, '$rindex', TMP_46 = function ːrindex(search, offset) {
       var self = this;
 
       
@@ -6683,19 +6994,19 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return i === -1 ? nil : i;
     
-    });
+    }, TMP_46.$$arity = -2);
 
-    Opal.defn(self, '$rjust', function(width, padstr) {
+    Opal.defn(self, '$rjust', TMP_47 = function ːrjust(width, padstr) {
       var $a, self = this;
 
       if (padstr == null) {
-        padstr = " "
+        padstr = " ";
       }
       width = $scope.get('Opal').$coerce_to(width, $scope.get('Integer'), "to_int");
       padstr = $scope.get('Opal').$coerce_to(padstr, $scope.get('String'), "to_str").$to_s();
-      if ((($a = padstr['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = padstr['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "zero width padding")};
-      if ((($a = width <= self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = width <= self.length) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self};
       
       var chars     = Math.floor(width - self.length),
@@ -6705,9 +7016,9 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return result + padstr.slice(0, remaining) + self;
     
-    });
+    }, TMP_47.$$arity = -2);
 
-    Opal.defn(self, '$rpartition', function(sep) {
+    Opal.defn(self, '$rpartition', TMP_48 = function ːrpartition(sep) {
       var self = this;
 
       
@@ -6749,18 +7060,18 @@ Opal.modules["corelib/string"] = function(Opal) {
         self.slice(i + sep.length)
       ];
     
-    });
+    }, TMP_48.$$arity = 1);
 
-    Opal.defn(self, '$rstrip', function() {
+    Opal.defn(self, '$rstrip', TMP_49 = function ːrstrip() {
       var self = this;
 
       return self.replace(/[\s\u0000]*$/, '');
-    });
+    }, TMP_49.$$arity = 0);
 
-    Opal.defn(self, '$scan', TMP_8 = function(pattern) {
-      var self = this, $iter = TMP_8.$$p, block = $iter || nil;
+    Opal.defn(self, '$scan', TMP_50 = function ːscan(pattern) {
+      var self = this, $iter = TMP_50.$$p, block = $iter || nil;
 
-      TMP_8.$$p = null;
+      TMP_50.$$p = null;
       
       var result = [],
           match_data = nil,
@@ -6789,13 +7100,13 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return (block !== nil ? self : result);
     
-    });
+    }, TMP_50.$$arity = 1);
 
     Opal.alias(self, 'size', 'length');
 
     Opal.alias(self, 'slice', '[]');
 
-    Opal.defn(self, '$split', function(pattern, limit) {
+    Opal.defn(self, '$split', TMP_51 = function ːsplit(pattern, limit) {
       var $a, self = this;
       if ($gvars[";"] == null) $gvars[";"] = nil;
 
@@ -6814,7 +7125,7 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
 
       if (pattern === undefined || pattern === nil) {
-        pattern = ((($a = $gvars[";"]) !== false && $a !== nil) ? $a : " ");
+        pattern = ((($a = $gvars[";"]) !== false && $a !== nil && $a != null) ? $a : " ");
       }
 
       var result = [],
@@ -6868,6 +7179,10 @@ Opal.modules["corelib/string"] = function(Opal) {
         return result;
       }
 
+      if (limit >= result.length) {
+        return result;
+      }
+
       i = 0;
       while (match !== null) {
         i++;
@@ -6877,20 +7192,19 @@ Opal.modules["corelib/string"] = function(Opal) {
         }
         match = pattern.exec(string);
       }
-
       result.splice(limit - 1, result.length - 1, string.slice(index));
       return result;
     
-    });
+    }, TMP_51.$$arity = -1);
 
-    Opal.defn(self, '$squeeze', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$squeeze', TMP_52 = function ːsqueeze($a_rest) {
+      var self = this, sets;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var sets = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        sets[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      sets = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        sets[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       if (sets.length === 0) {
@@ -6902,16 +7216,16 @@ Opal.modules["corelib/string"] = function(Opal) {
       }
       return self.replace(new RegExp('(' + char_class + ')\\1+', 'g'), '$1');
     
-    });
+    }, TMP_52.$$arity = -1);
 
-    Opal.defn(self, '$start_with?', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$start_with?', TMP_53 = function($a_rest) {
+      var self = this, prefixes;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var prefixes = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        prefixes[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      prefixes = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        prefixes[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = 0, length = prefixes.length; i < length; i++) {
@@ -6924,18 +7238,18 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return false;
     
-    });
+    }, TMP_53.$$arity = -1);
 
-    Opal.defn(self, '$strip', function() {
+    Opal.defn(self, '$strip', TMP_54 = function ːstrip() {
       var self = this;
 
       return self.replace(/^\s*/, '').replace(/[\s\u0000]*$/, '');
-    });
+    }, TMP_54.$$arity = 0);
 
-    Opal.defn(self, '$sub', TMP_9 = function(pattern, replacement) {
-      var self = this, $iter = TMP_9.$$p, block = $iter || nil;
+    Opal.defn(self, '$sub', TMP_55 = function ːsub(pattern, replacement) {
+      var self = this, $iter = TMP_55.$$p, block = $iter || nil;
 
-      TMP_9.$$p = null;
+      TMP_55.$$p = null;
       
       if (!pattern.$$is_regexp) {
         pattern = $scope.get('Opal').$coerce_to(pattern, $scope.get('String'), "to_str");
@@ -6985,15 +7299,15 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return self.slice(0, result.index) + replacement + self.slice(result.index + result[0].length);
     ;
-    });
+    }, TMP_55.$$arity = -2);
 
     Opal.alias(self, 'succ', 'next');
 
-    Opal.defn(self, '$sum', function(n) {
+    Opal.defn(self, '$sum', TMP_56 = function ːsum(n) {
       var self = this;
 
       if (n == null) {
-        n = 16
+        n = 16;
       }
       
       n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
@@ -7012,9 +7326,9 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return result & (Math.pow(2, n) - 1);
     ;
-    });
+    }, TMP_56.$$arity = -1);
 
-    Opal.defn(self, '$swapcase', function() {
+    Opal.defn(self, '$swapcase', TMP_57 = function ːswapcase() {
       var self = this;
 
       
@@ -7028,9 +7342,9 @@ Opal.modules["corelib/string"] = function(Opal) {
 
       return self.$class().$new(str);
     
-    });
+    }, TMP_57.$$arity = 0);
 
-    Opal.defn(self, '$to_f', function() {
+    Opal.defn(self, '$to_f', TMP_58 = function ːto_f() {
       var self = this;
 
       
@@ -7047,13 +7361,13 @@ Opal.modules["corelib/string"] = function(Opal) {
         return result;
       }
     
-    });
+    }, TMP_58.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function(base) {
+    Opal.defn(self, '$to_i', TMP_59 = function ːto_i(base) {
       var self = this;
 
       if (base == null) {
-        base = 10
+        base = 10;
       }
       
       var result,
@@ -7111,32 +7425,38 @@ Opal.modules["corelib/string"] = function(Opal) {
       result = parseInt(string.replace(/_(?!_)/g, ''), radix);
       return isNaN(result) ? 0 : result;
     ;
-    });
+    }, TMP_59.$$arity = -1);
 
-    Opal.defn(self, '$to_proc', function() {
-      var $a, $b, TMP_10, self = this, sym = nil;
+    Opal.defn(self, '$to_proc', TMP_61 = function ːto_proc() {
+      var $a, $b, TMP_60, self = this, sym = nil;
 
       sym = self;
-      return ($a = ($b = self).$proc, $a.$$p = (TMP_10 = function(args){var self = TMP_10.$$s || this, block, $a, $b, obj = nil;
-args = $slice.call(arguments, 0);
-        block = TMP_10.$$p || nil, TMP_10.$$p = null;
-      if ((($a = args['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      return ($a = ($b = self).$proc, $a.$$p = (TMP_60 = function($c_rest){var self = TMP_60.$$s || this, block, args, $d, $e, obj = nil;
+
+        block = TMP_60.$$p || nil, TMP_60.$$p = null;
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
+        }
+      if ((($d = args['$empty?']()) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
           self.$raise($scope.get('ArgumentError'), "no receiver given")};
         obj = args.$shift();
-        return ($a = ($b = obj).$__send__, $a.$$p = block.$to_proc(), $a).apply($b, [sym].concat(Opal.to_a(args)));}, TMP_10.$$s = self, TMP_10), $a).call($b);
-    });
+        return ($d = ($e = obj).$__send__, $d.$$p = block.$to_proc(), $d).apply($e, [sym].concat(Opal.to_a(args)));}, TMP_60.$$s = self, TMP_60.$$arity = -1, TMP_60), $a).call($b);
+    }, TMP_61.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_62 = function ːto_s() {
       var self = this;
 
       return self.toString();
-    });
+    }, TMP_62.$$arity = 0);
 
     Opal.alias(self, 'to_str', 'to_s');
 
     Opal.alias(self, 'to_sym', 'intern');
 
-    Opal.defn(self, '$tr', function(from, to) {
+    Opal.defn(self, '$tr', TMP_63 = function ːtr(from, to) {
       var self = this;
 
       from = $scope.get('Opal').$coerce_to(from, $scope.get('String'), "to_str").$to_s();
@@ -7216,8 +7536,8 @@ args = $slice.call(arguments, 0);
           in_range = false;
           for (i = 0; i < to_length; i++) {
             ch = to_chars[i];
-            if (last_from == null) {
-              last_from = ch;
+            if (last_to == null) {
+              last_to = ch;
               to_chars_expanded.push(ch);
             }
             else if (ch === '-') {
@@ -7233,7 +7553,7 @@ args = $slice.call(arguments, 0);
               }
             }
             else if (in_range) {
-              start = last_from.charCodeAt(0);
+              start = last_to.charCodeAt(0);
               end = ch.charCodeAt(0);
               if (start > end) {
                 self.$raise($scope.get('ArgumentError'), "invalid range \"" + (String.fromCharCode(start)) + "-" + (String.fromCharCode(end)) + "\" in string transliteration")
@@ -7243,7 +7563,7 @@ args = $slice.call(arguments, 0);
               }
               to_chars_expanded.push(ch);
               in_range = null;
-              last_from = null;
+              last_to = null;
             }
             else {
               to_chars_expanded.push(ch);
@@ -7280,9 +7600,9 @@ args = $slice.call(arguments, 0);
       }
       return new_str;
     
-    });
+    }, TMP_63.$$arity = 2);
 
-    Opal.defn(self, '$tr_s', function(from, to) {
+    Opal.defn(self, '$tr_s', TMP_64 = function ːtr_s(from, to) {
       var self = this;
 
       from = $scope.get('Opal').$coerce_to(from, $scope.get('String'), "to_str").$to_s();
@@ -7444,28 +7764,28 @@ args = $slice.call(arguments, 0);
       }
       return new_str;
     
-    });
+    }, TMP_64.$$arity = 2);
 
-    Opal.defn(self, '$upcase', function() {
+    Opal.defn(self, '$upcase', TMP_65 = function ːupcase() {
       var self = this;
 
       return self.toUpperCase();
-    });
+    }, TMP_65.$$arity = 0);
 
-    Opal.defn(self, '$upto', TMP_11 = function(stop, excl) {
-      var self = this, $iter = TMP_11.$$p, block = $iter || nil;
+    Opal.defn(self, '$upto', TMP_66 = function ːupto(stop, excl) {
+      var self = this, $iter = TMP_66.$$p, block = $iter || nil;
 
       if (excl == null) {
-        excl = false
+        excl = false;
       }
-      TMP_11.$$p = null;
+      TMP_66.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("upto", stop, excl)
       };
       stop = $scope.get('Opal').$coerce_to(stop, $scope.get('String'), "to_str");
       
-      var a, b, s = self.toString(), value;
+      var a, b, s = self.toString();
 
       if (s.length === 1 && stop.length === 1) {
 
@@ -7477,8 +7797,7 @@ args = $slice.call(arguments, 0);
             break;
           }
 
-          value = block(String.fromCharCode(a));
-          if (value === $breaker) { return $breaker.$v; }
+          block(String.fromCharCode(a));
 
           a += 1;
         }
@@ -7493,8 +7812,7 @@ args = $slice.call(arguments, 0);
             break;
           }
 
-          value = block(a.toString());
-          if (value === $breaker) { return $breaker.$v; }
+          block(a.toString());
 
           a += 1;
         }
@@ -7506,8 +7824,7 @@ args = $slice.call(arguments, 0);
             break;
           }
 
-          value = block(s);
-          if (value === $breaker) { return $breaker.$v; }
+          block(s);
 
           s = (s).$succ();
         }
@@ -7515,7 +7832,7 @@ args = $slice.call(arguments, 0);
       }
       return self;
     
-    });
+    }, TMP_66.$$arity = -2);
 
     
     function char_class_from_char_sets(sets) {
@@ -7602,13 +7919,29 @@ args = $slice.call(arguments, 0);
       return null;
     }
   
+
+    Opal.defn(self, '$instance_variables', TMP_67 = function ːinstance_variables() {
+      var self = this;
+
+      return [];
+    }, TMP_67.$$arity = 0);
+
+    return (Opal.defs(self, '$_load', TMP_68 = function ː_load($a_rest) {
+      var $b, self = this, args;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      return ($b = self).$new.apply($b, Opal.to_a(args));
+    }, TMP_68.$$arity = -1), nil) && '_load';
   })($scope.base, String);
   return Opal.cdecl($scope, 'Symbol', $scope.get('String'));
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/enumerable"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -7629,95 +7962,97 @@ Opal.modules["corelib/enumerable"] = function(Opal) {
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $module = Opal.module;
 
-  Opal.add_stubs(['$raise', '$new', '$yield', '$dup', '$enum_for', '$enumerator_size', '$flatten', '$map', '$==', '$destructure', '$respond_to?', '$coerce_to!', '$>', '$*', '$nil?', '$coerce_to', '$try_convert', '$<', '$+', '$-', '$ceil', '$/', '$size', '$===', '$<<', '$[]', '$[]=', '$inspect', '$__send__', '$compare', '$<=>', '$proc', '$call', '$to_a', '$lambda', '$sort!', '$map!', '$first', '$zip']);
+  Opal.add_stubs(['$each', '$destructure', '$raise', '$new', '$yield', '$dup', '$enum_for', '$enumerator_size', '$flatten', '$map', '$proc', '$==', '$nil?', '$respond_to?', '$coerce_to!', '$>', '$*', '$coerce_to', '$try_convert', '$<', '$+', '$-', '$to_enum', '$ceil', '$/', '$size', '$===', '$<<', '$[]', '$[]=', '$inspect', '$__send__', '$<=>', '$first', '$reverse', '$sort', '$to_proc', '$compare', '$call', '$to_a', '$lambda', '$sort!', '$map!', '$zip']);
   return (function($base) {
     var $Enumerable, self = $Enumerable = $module($base, 'Enumerable');
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_6, TMP_8, TMP_11, TMP_12, TMP_14, TMP_15, TMP_16, TMP_18, TMP_19, TMP_21, TMP_23, TMP_25, TMP_27, TMP_28, TMP_29, TMP_31, TMP_33, TMP_34, TMP_36, TMP_37, TMP_39, TMP_41, TMP_42, TMP_43, TMP_44, TMP_46, TMP_48, TMP_50, TMP_52, TMP_54, TMP_59, TMP_60;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_4, TMP_7, TMP_10, TMP_12, TMP_15, TMP_19, TMP_21, TMP_23, TMP_24, TMP_25, TMP_27, TMP_29, TMP_31, TMP_33, TMP_35, TMP_36, TMP_38, TMP_43, TMP_44, TMP_45, TMP_48, TMP_49, TMP_51, TMP_52, TMP_53, TMP_54, TMP_56, TMP_57, TMP_59, TMP_61, TMP_62, TMP_65, TMP_68, TMP_70, TMP_72, TMP_74, TMP_76, TMP_78, TMP_83, TMP_84, TMP_86;
 
-    Opal.defn(self, '$all?', TMP_1 = function() {
-      var $a, self = this, $iter = TMP_1.$$p, block = $iter || nil;
+    Opal.defn(self, '$all?', TMP_1 = function() {try {
+
+      var $a, $b, TMP_2, $c, TMP_3, self = this, $iter = TMP_1.$$p, block = $iter || nil;
 
       TMP_1.$$p = null;
-      
-      var result = true;
+      if ((block !== nil)) {
+        ($a = ($b = self).$each, $a.$$p = (TMP_2 = function($c_rest){var self = TMP_2.$$s || this, value, $d;
 
-      if (block !== nil) {
-        self.$each.$$p = function() {
-          var value = Opal.yieldX(block, arguments);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ((($d = Opal.yieldX(block, Opal.to_a(value))) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            return nil
+            } else {
+            Opal.ret(false)
+          }}, TMP_2.$$s = self, TMP_2.$$arity = -1, TMP_2), $a).call($b)
+        } else {
+        ($a = ($c = self).$each, $a.$$p = (TMP_3 = function($d_rest){var self = TMP_3.$$s || this, value, $e;
 
-          if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
-            result = false;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
-        };
-      }
-      else {
-        self.$each.$$p = function(obj) {
-          if (arguments.length == 1 && (($a = obj) === nil || ($a.$$is_boolean && $a == false))) {
-            result = false;
-            return $breaker;
+        if ((($e = $scope.get('Opal').$destructure(value)) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            return nil
+            } else {
+            Opal.ret(false)
+          }}, TMP_3.$$s = self, TMP_3.$$arity = -1, TMP_3), $a).call($c)
+      };
+      return true;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_1.$$arity = 0);
+
+    Opal.defn(self, '$any?', TMP_4 = function() {try {
+
+      var $a, $b, TMP_5, $c, TMP_6, self = this, $iter = TMP_4.$$p, block = $iter || nil;
+
+      TMP_4.$$p = null;
+      if ((block !== nil)) {
+        ($a = ($b = self).$each, $a.$$p = (TMP_5 = function($c_rest){var self = TMP_5.$$s || this, value, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
-        };
-      }
+        if ((($d = Opal.yieldX(block, Opal.to_a(value))) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            Opal.ret(true)
+            } else {
+            return nil
+          }}, TMP_5.$$s = self, TMP_5.$$arity = -1, TMP_5), $a).call($b)
+        } else {
+        ($a = ($c = self).$each, $a.$$p = (TMP_6 = function($d_rest){var self = TMP_6.$$s || this, value, $e;
 
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$any?', TMP_2 = function() {
-      var $a, self = this, $iter = TMP_2.$$p, block = $iter || nil;
-
-      TMP_2.$$p = null;
-      
-      var result = false;
-
-      if (block !== nil) {
-        self.$each.$$p = function() {
-          var value = Opal.yieldX(block, arguments);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ((($e = $scope.get('Opal').$destructure(value)) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            Opal.ret(true)
+            } else {
+            return nil
+          }}, TMP_6.$$s = self, TMP_6.$$arity = -1, TMP_6), $a).call($c)
+      };
+      return false;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_4.$$arity = 0);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            result = true;
-            return $breaker;
-          }
-        };
-      }
-      else {
-        self.$each.$$p = function(obj) {
-          if (arguments.length != 1 || (($a = obj) !== nil && (!$a.$$is_boolean || $a == true))) {
-            result = true;
-            return $breaker;
-          }
-        }
-      }
+    Opal.defn(self, '$chunk', TMP_7 = function ːchunk(state) {
+      var $a, $b, TMP_8, self = this, $iter = TMP_7.$$p, original_block = $iter || nil;
 
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$chunk', TMP_3 = function(state) {
-      var $a, $b, TMP_4, self = this, $iter = TMP_3.$$p, original_block = $iter || nil;
-
-      TMP_3.$$p = null;
-      if (original_block !== false && original_block !== nil) {
+      TMP_7.$$p = null;
+      if (original_block !== false && original_block !== nil && original_block != null) {
         } else {
         $scope.get('Kernel').$raise($scope.get('ArgumentError'), "no block given")
       };
-      return ($a = ($b = Opal.get('Enumerator')).$new, $a.$$p = (TMP_4 = function(yielder){var self = TMP_4.$$s || this, $a, $b, TMP_5;
+      return ($a = ($b = Opal.get('Enumerator')).$new, $a.$$p = (TMP_8 = function(yielder){var self = TMP_8.$$s || this, $c, $d, TMP_9;
 if (yielder == null) yielder = nil;
       
         var block, previous = nil, accumulate = [];
@@ -7725,9 +8060,9 @@ if (yielder == null) yielder = nil;
         if (state == undefined || state === nil) {
           block = original_block;
         } else {
-          block = ($a = ($b = $scope.get('Proc')).$new, $a.$$p = (TMP_5 = function(val){var self = TMP_5.$$s || this;
+          block = ($c = ($d = $scope.get('Proc')).$new, $c.$$p = (TMP_9 = function(val){var self = TMP_9.$$s || this;
 if (val == null) val = nil;
-        return original_block.$yield(val, state.$dup())}, TMP_5.$$s = self, TMP_5), $a).call($b)
+        return original_block.$yield(val, state.$dup())}, TMP_9.$$s = self, TMP_9.$$arity = 1, TMP_9), $c).call($d)
         }
 
         function releaseAccumulate() {
@@ -7738,10 +8073,6 @@ if (val == null) val = nil;
 
         self.$each.$$p = function(value) {
           var key = Opal.yield1(block, value);
-
-          if (key === $breaker) {
-            return $breaker;
-          }
 
           if (key === nil) {
             releaseAccumulate();
@@ -7762,29 +8093,24 @@ if (val == null) val = nil;
         self.$each();
 
         releaseAccumulate();
-      ;}, TMP_4.$$s = self, TMP_4), $a).call($b);
-    });
+      ;}, TMP_8.$$s = self, TMP_8.$$arity = 1, TMP_8), $a).call($b);
+    }, TMP_7.$$arity = -1);
 
-    Opal.defn(self, '$collect', TMP_6 = function() {
-      var $a, $b, TMP_7, self = this, $iter = TMP_6.$$p, block = $iter || nil;
+    Opal.defn(self, '$collect', TMP_10 = function ːcollect() {
+      var $a, $b, TMP_11, self = this, $iter = TMP_10.$$p, block = $iter || nil;
 
-      TMP_6.$$p = null;
+      TMP_10.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_7 = function(){var self = TMP_7.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_11 = function(){var self = TMP_11.$$s || this;
 
-        return self.$enumerator_size()}, TMP_7.$$s = self, TMP_7), $a).call($b, "collect")
+        return self.$enumerator_size()}, TMP_11.$$s = self, TMP_11.$$arity = 0, TMP_11), $a).call($b, "collect")
       };
       
       var result = [];
 
       self.$each.$$p = function() {
         var value = Opal.yieldX(block, arguments);
-
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
 
         result.push(value);
       };
@@ -7793,88 +8119,88 @@ if (val == null) val = nil;
 
       return result;
     
-    });
+    }, TMP_10.$$arity = 0);
 
-    Opal.defn(self, '$collect_concat', TMP_8 = function() {
-      var $a, $b, TMP_9, $c, TMP_10, self = this, $iter = TMP_8.$$p, block = $iter || nil;
+    Opal.defn(self, '$collect_concat', TMP_12 = function ːcollect_concat() {
+      var $a, $b, TMP_13, $c, TMP_14, self = this, $iter = TMP_12.$$p, block = $iter || nil;
 
-      TMP_8.$$p = null;
-      if ((block !== nil)) {
-        } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_9 = function(){var self = TMP_9.$$s || this;
-
-        return self.$enumerator_size()}, TMP_9.$$s = self, TMP_9), $a).call($b, "collect_concat")
-      };
-      return ($a = ($c = self).$map, $a.$$p = (TMP_10 = function(item){var self = TMP_10.$$s || this, $a;
-if (item == null) item = nil;
-      return $a = Opal.yield1(block, item), $a === $breaker ? $a : $a}, TMP_10.$$s = self, TMP_10), $a).call($c).$flatten(1);
-    });
-
-    Opal.defn(self, '$count', TMP_11 = function(object) {
-      var $a, self = this, $iter = TMP_11.$$p, block = $iter || nil;
-
-      TMP_11.$$p = null;
-      
-      var result = 0;
-
-      if (object != null) {
-        block = function() {
-          return $scope.get('Opal').$destructure(arguments)['$=='](object);
-        };
-      }
-      else if (block === nil) {
-        block = function() { return true; };
-      }
-
-      self.$each.$$p = function() {
-        var value = Opal.yieldX(block, arguments);
-
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-          result++;
-        }
-      }
-
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$cycle', TMP_12 = function(n) {
-      var $a, $b, TMP_13, self = this, $iter = TMP_12.$$p, block = $iter || nil;
-
-      if (n == null) {
-        n = nil
-      }
       TMP_12.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_13 = function(){var self = TMP_13.$$s || this, $a;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_13 = function(){var self = TMP_13.$$s || this;
+
+        return self.$enumerator_size()}, TMP_13.$$s = self, TMP_13.$$arity = 0, TMP_13), $a).call($b, "collect_concat")
+      };
+      return ($a = ($c = self).$map, $a.$$p = (TMP_14 = function(item){var self = TMP_14.$$s || this;
+if (item == null) item = nil;
+      return Opal.yield1(block, item);}, TMP_14.$$s = self, TMP_14.$$arity = 1, TMP_14), $a).call($c).$flatten(1);
+    }, TMP_12.$$arity = 0);
+
+    Opal.defn(self, '$count', TMP_15 = function ːcount(object) {
+      var $a, $b, TMP_16, $c, TMP_17, $d, TMP_18, self = this, $iter = TMP_15.$$p, block = $iter || nil, result = nil;
+
+      TMP_15.$$p = null;
+      result = 0;
+      if ((($a = object != null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        block = ($a = ($b = self).$proc, $a.$$p = (TMP_16 = function($c_rest){var self = TMP_16.$$s || this, args;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 0] = arguments[$arg_idx];
+          }
+        return $scope.get('Opal').$destructure(args)['$=='](object)}, TMP_16.$$s = self, TMP_16.$$arity = -1, TMP_16), $a).call($b)
+      } else if ((($a = block['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        block = ($a = ($c = self).$proc, $a.$$p = (TMP_17 = function(){var self = TMP_17.$$s || this;
+
+        return true}, TMP_17.$$s = self, TMP_17.$$arity = 0, TMP_17), $a).call($c)};
+      ($a = ($d = self).$each, $a.$$p = (TMP_18 = function($e_rest){var self = TMP_18.$$s || this, args, $f;
+
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
+        }
+      if ((($f = Opal.yieldX(block, args)) !== nil && $f != null && (!$f.$$is_boolean || $f == true))) {
+          return result++;
+          } else {
+          return nil
+        }}, TMP_18.$$s = self, TMP_18.$$arity = -1, TMP_18), $a).call($d);
+      return result;
+    }, TMP_15.$$arity = -1);
+
+    Opal.defn(self, '$cycle', TMP_19 = function ːcycle(n) {
+      var $a, $b, TMP_20, self = this, $iter = TMP_19.$$p, block = $iter || nil;
+
+      if (n == null) {
+        n = nil;
+      }
+      TMP_19.$$p = null;
+      if ((block !== nil)) {
+        } else {
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_20 = function(){var self = TMP_20.$$s || this, $c;
 
         if (n['$=='](nil)) {
-            if ((($a = self['$respond_to?']("size")) !== nil && (!$a.$$is_boolean || $a == true))) {
+            if ((($c = self['$respond_to?']("size")) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
               return (($scope.get('Float')).$$scope.get('INFINITY'))
               } else {
               return nil
             }
             } else {
             n = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
-            if ((($a = $rb_gt(n, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+            if ((($c = $rb_gt(n, 0)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
               return $rb_times(self.$enumerator_size(), n)
               } else {
               return 0
             };
-          }}, TMP_13.$$s = self, TMP_13), $a).call($b, "cycle", n)
+          }}, TMP_20.$$s = self, TMP_20.$$arity = 0, TMP_20), $a).call($b, "cycle", n)
       };
-      if ((($a = n['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = n['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         n = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
-        if ((($a = n <= 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = n <= 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return nil};
       };
       
@@ -7884,11 +8210,6 @@ if (item == null) item = nil;
       self.$each.$$p = function() {
         var param = $scope.get('Opal').$destructure(arguments),
             value = Opal.yield1(block, param);
-
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
 
         all.push(param);
       }
@@ -7907,10 +8228,6 @@ if (item == null) item = nil;
         while (true) {
           for (i = 0, length = all.length; i < length; i++) {
             value = Opal.yield1(block, all[i]);
-
-            if (value === $breaker) {
-              return $breaker.$v;
-            }
           }
         }
       }
@@ -7918,64 +8235,55 @@ if (item == null) item = nil;
         while (n > 1) {
           for (i = 0, length = all.length; i < length; i++) {
             value = Opal.yield1(block, all[i]);
-
-            if (value === $breaker) {
-              return $breaker.$v;
-            }
           }
 
           n--;
         }
       }
     
-    });
+    }, TMP_19.$$arity = -1);
 
-    Opal.defn(self, '$detect', TMP_14 = function(ifnone) {
-      var $a, self = this, $iter = TMP_14.$$p, block = $iter || nil;
+    Opal.defn(self, '$detect', TMP_21 = function ːdetect(ifnone) {try {
 
-      TMP_14.$$p = null;
+      var $a, $b, TMP_22, self = this, $iter = TMP_21.$$p, block = $iter || nil;
+
+      TMP_21.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("detect", ifnone)
       };
+      ($a = ($b = self).$each, $a.$$p = (TMP_22 = function($c_rest){var self = TMP_22.$$s || this, args, $d, value = nil;
+
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
+        }
+      value = $scope.get('Opal').$destructure(args);
+        if ((($d = Opal.yield1(block, value)) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+          Opal.ret(value)
+          } else {
+          return nil
+        };}, TMP_22.$$s = self, TMP_22.$$arity = -1, TMP_22), $a).call($b);
       
-      var result;
-
-      self.$each.$$p = function() {
-        var params = $scope.get('Opal').$destructure(arguments),
-            value  = Opal.yield1(block, params);
-
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-          result = params;
-          return $breaker;
-        }
-      };
-
-      self.$each();
-
-      if (result === undefined && ifnone !== undefined) {
+      if (ifnone !== undefined) {
         if (typeof(ifnone) === 'function') {
-          result = ifnone();
-        }
-        else {
-          result = ifnone;
+          return ifnone();
+        } else {
+          return ifnone;
         }
       }
-
-      return result === undefined ? nil : result;
     
-    });
+      return nil;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_21.$$arity = -1);
 
-    Opal.defn(self, '$drop', function(number) {
+    Opal.defn(self, '$drop', TMP_23 = function ːdrop(number) {
       var $a, self = this;
 
       number = $scope.get('Opal').$coerce_to(number, $scope.get('Integer'), "to_int");
-      if ((($a = number < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = number < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "attempt to drop negative size")};
       
       var result  = [],
@@ -7993,12 +8301,12 @@ if (item == null) item = nil;
 
       return result;
     
-    });
+    }, TMP_23.$$arity = 1);
 
-    Opal.defn(self, '$drop_while', TMP_15 = function() {
-      var $a, self = this, $iter = TMP_15.$$p, block = $iter || nil;
+    Opal.defn(self, '$drop_while', TMP_24 = function ːdrop_while() {
+      var $a, self = this, $iter = TMP_24.$$p, block = $iter || nil;
 
-      TMP_15.$$p = null;
+      TMP_24.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("drop_while")
@@ -8013,12 +8321,7 @@ if (item == null) item = nil;
         if (dropping) {
           var value = Opal.yield1(block, param);
 
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
-          }
-
-          if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
+          if ((($a = value) === nil || $a == null || ($a.$$is_boolean && $a == false))) {
             dropping = false;
             result.push(param);
           }
@@ -8032,29 +8335,29 @@ if (item == null) item = nil;
 
       return result;
     
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$each_cons', TMP_16 = function(n) {
-      var $a, $b, TMP_17, self = this, $iter = TMP_16.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_cons', TMP_25 = function ːeach_cons(n) {
+      var $a, $b, TMP_26, self = this, $iter = TMP_25.$$p, block = $iter || nil;
 
-      TMP_16.$$p = null;
-      if ((($a = arguments.length != 1) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_25.$$p = null;
+      if ((($a = arguments.length != 1) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (arguments.length) + " for 1)")};
       n = $scope.get('Opal').$try_convert(n, $scope.get('Integer'), "to_int");
-      if ((($a = n <= 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = n <= 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "invalid size")};
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_17 = function(){var self = TMP_17.$$s || this, $a, $b, enum_size = nil;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_26 = function(){var self = TMP_26.$$s || this, $c, $d, enum_size = nil;
 
         enum_size = self.$enumerator_size();
-          if ((($a = enum_size['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($c = enum_size['$nil?']()) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             return nil
-          } else if ((($a = ((($b = enum_size['$=='](0)) !== false && $b !== nil) ? $b : $rb_lt(enum_size, n))) !== nil && (!$a.$$is_boolean || $a == true))) {
+          } else if ((($c = ((($d = enum_size['$=='](0)) !== false && $d !== nil && $d != null) ? $d : $rb_lt(enum_size, n))) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             return 0
             } else {
             return $rb_plus($rb_minus(enum_size, n), 1)
-          };}, TMP_17.$$s = self, TMP_17), $a).call($b, "each_cons", n)
+          };}, TMP_26.$$s = self, TMP_26.$$arity = 0, TMP_26), $a).call($b, "each_cons", n)
       };
       
       var buffer = [], result = nil;
@@ -8066,12 +8369,7 @@ if (item == null) item = nil;
           buffer.shift();
         }
         if (buffer.length == n) {
-          var value = Opal.yield1(block, buffer.slice(0, n));
-
-          if (value == $breaker) {
-            result = $breaker.$v;
-            return $breaker;
-          }
+          Opal.yield1(block, buffer.slice(0, n));
         }
       }
 
@@ -8079,31 +8377,53 @@ if (item == null) item = nil;
 
       return result;
     
-    });
+    }, TMP_25.$$arity = 1);
 
-    Opal.defn(self, '$each_entry', TMP_18 = function() {
-      var self = this, $iter = TMP_18.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_entry', TMP_27 = function ːeach_entry($a_rest) {
+      var $b, $c, TMP_28, self = this, data, $iter = TMP_27.$$p, block = $iter || nil;
 
-      TMP_18.$$p = null;
-      return self.$raise($scope.get('NotImplementedError'));
-    });
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      data = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        data[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      TMP_27.$$p = null;
+      if ((block !== nil)) {
+        } else {
+        return ($b = ($c = self).$to_enum, $b.$$p = (TMP_28 = function(){var self = TMP_28.$$s || this;
 
-    Opal.defn(self, '$each_slice', TMP_19 = function(n) {
-      var $a, $b, TMP_20, self = this, $iter = TMP_19.$$p, block = $iter || nil;
+        return self.$enumerator_size()}, TMP_28.$$s = self, TMP_28.$$arity = 0, TMP_28), $b).apply($c, ["each_entry"].concat(Opal.to_a(data)))
+      };
+      
+      self.$each.$$p = function() {
+        var item = $scope.get('Opal').$destructure(arguments);
 
-      TMP_19.$$p = null;
+        Opal.yield1(block, item);
+      }
+
+      self.$each.apply(self, data);
+
+      return self;
+    ;
+    }, TMP_27.$$arity = -1);
+
+    Opal.defn(self, '$each_slice', TMP_29 = function ːeach_slice(n) {
+      var $a, $b, TMP_30, self = this, $iter = TMP_29.$$p, block = $iter || nil;
+
+      TMP_29.$$p = null;
       n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
-      if ((($a = n <= 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = n <= 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "invalid slice size")};
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_20 = function(){var self = TMP_20.$$s || this, $a;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_30 = function(){var self = TMP_30.$$s || this, $c;
 
-        if ((($a = self['$respond_to?']("size")) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($c = self['$respond_to?']("size")) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             return ($rb_divide(self.$size(), n)).$ceil()
             } else {
             return nil
-          }}, TMP_20.$$s = self, TMP_20), $a).call($b, "each_slice", n)
+          }}, TMP_30.$$s = self, TMP_30.$$arity = 0, TMP_30), $a).call($b, "each_slice", n)
       };
       
       var result,
@@ -8115,11 +8435,7 @@ if (item == null) item = nil;
         slice.push(param);
 
         if (slice.length === n) {
-          if (Opal.yield1(block, slice) === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
-          }
-
+          Opal.yield1(block, slice);
           slice = [];
         }
       };
@@ -8132,42 +8448,36 @@ if (item == null) item = nil;
 
       // our "last" group, if smaller than n then won't have been yielded
       if (slice.length > 0) {
-        if (Opal.yield1(block, slice) === $breaker) {
-          return $breaker.$v;
-        }
+        Opal.yield1(block, slice);
       }
     ;
       return nil;
-    });
+    }, TMP_29.$$arity = 1);
 
-    Opal.defn(self, '$each_with_index', TMP_21 = function() {
-      var $a, $b, TMP_22, self = this, $iter = TMP_21.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$each_with_index', TMP_31 = function ːeach_with_index($a_rest) {
+      var $b, $c, TMP_32, self = this, args, $iter = TMP_31.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_21.$$p = null;
+      TMP_31.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_22 = function(){var self = TMP_22.$$s || this;
+        return ($b = ($c = self).$enum_for, $b.$$p = (TMP_32 = function(){var self = TMP_32.$$s || this;
 
-        return self.$enumerator_size()}, TMP_22.$$s = self, TMP_22), $a).apply($b, ["each_with_index"].concat(Opal.to_a(args)))
+        return self.$enumerator_size()}, TMP_32.$$s = self, TMP_32.$$arity = 0, TMP_32), $b).apply($c, ["each_with_index"].concat(Opal.to_a(args)))
       };
       
       var result,
           index = 0;
 
       self.$each.$$p = function() {
-        var param = $scope.get('Opal').$destructure(arguments),
-            value = block(param, index);
+        var param = $scope.get('Opal').$destructure(arguments);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
+        block(param, index);
 
         index++;
       };
@@ -8179,29 +8489,25 @@ if (item == null) item = nil;
       }
     
       return self;
-    });
+    }, TMP_31.$$arity = -1);
 
-    Opal.defn(self, '$each_with_object', TMP_23 = function(object) {
-      var $a, $b, TMP_24, self = this, $iter = TMP_23.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_with_object', TMP_33 = function ːeach_with_object(object) {
+      var $a, $b, TMP_34, self = this, $iter = TMP_33.$$p, block = $iter || nil;
 
-      TMP_23.$$p = null;
+      TMP_33.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_24 = function(){var self = TMP_24.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_34 = function(){var self = TMP_34.$$s || this;
 
-        return self.$enumerator_size()}, TMP_24.$$s = self, TMP_24), $a).call($b, "each_with_object", object)
+        return self.$enumerator_size()}, TMP_34.$$s = self, TMP_34.$$arity = 0, TMP_34), $a).call($b, "each_with_object", object)
       };
       
       var result;
 
       self.$each.$$p = function() {
-        var param = $scope.get('Opal').$destructure(arguments),
-            value = block(param, object);
+        var param = $scope.get('Opal').$destructure(arguments);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
+        block(param, object);
       };
 
       self.$each();
@@ -8211,16 +8517,16 @@ if (item == null) item = nil;
       }
     
       return object;
-    });
+    }, TMP_33.$$arity = 1);
 
-    Opal.defn(self, '$entries', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$entries', TMP_35 = function ːentries($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var result = [];
@@ -8233,19 +8539,19 @@ if (item == null) item = nil;
 
       return result;
     
-    });
+    }, TMP_35.$$arity = -1);
 
     Opal.alias(self, 'find', 'detect');
 
-    Opal.defn(self, '$find_all', TMP_25 = function() {
-      var $a, $b, TMP_26, self = this, $iter = TMP_25.$$p, block = $iter || nil;
+    Opal.defn(self, '$find_all', TMP_36 = function ːfind_all() {
+      var $a, $b, TMP_37, self = this, $iter = TMP_36.$$p, block = $iter || nil;
 
-      TMP_25.$$p = null;
+      TMP_36.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_26 = function(){var self = TMP_26.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_37 = function(){var self = TMP_37.$$s || this;
 
-        return self.$enumerator_size()}, TMP_26.$$s = self, TMP_26), $a).call($b, "find_all")
+        return self.$enumerator_size()}, TMP_37.$$s = self, TMP_37.$$arity = 0, TMP_37), $a).call($b, "find_all")
       };
       
       var result = [];
@@ -8254,12 +8560,7 @@ if (item == null) item = nil;
         var param = $scope.get('Opal').$destructure(arguments),
             value = Opal.yield1(block, param);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = value) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           result.push(param);
         }
       };
@@ -8268,99 +8569,86 @@ if (item == null) item = nil;
 
       return result;
     
-    });
+    }, TMP_36.$$arity = 0);
 
-    Opal.defn(self, '$find_index', TMP_27 = function(object) {
-      var $a, self = this, $iter = TMP_27.$$p, block = $iter || nil;
+    Opal.defn(self, '$find_index', TMP_38 = function ːfind_index(object) {try {
 
-      TMP_27.$$p = null;
-      if ((($a = object === undefined && block === nil) !== nil && (!$a.$$is_boolean || $a == true))) {
+      var $a, $b, TMP_39, $c, TMP_40, self = this, $iter = TMP_38.$$p, block = $iter || nil, index = nil;
+
+      TMP_38.$$p = null;
+      if ((($a = object === undefined && block === nil) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$enum_for("find_index")};
-      
-      var result = nil,
-          index  = 0;
+      index = 0;
+      if ((($a = object != null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        ($a = ($b = self).$each, $a.$$p = (TMP_39 = function($c_rest){var self = TMP_39.$$s || this, value;
 
-      if (object != null) {
-        self.$each.$$p = function() {
-          var param = $scope.get('Opal').$destructure(arguments);
-
-          if ((param)['$=='](object)) {
-            result = index;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ($scope.get('Opal').$destructure(value)['$=='](object)) {
+            Opal.ret(index)};
+          return index += 1;}, TMP_39.$$s = self, TMP_39.$$arity = -1, TMP_39), $a).call($b)
+        } else {
+        ($a = ($c = self).$each, $a.$$p = (TMP_40 = function($d_rest){var self = TMP_40.$$s || this, value, $e;
 
-          index += 1;
-        };
-      }
-      else if (block !== nil) {
-        self.$each.$$p = function() {
-          var value = Opal.yieldX(block, arguments);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ((($e = Opal.yieldX(block, Opal.to_a(value))) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            Opal.ret(index)};
+          return index += 1;}, TMP_40.$$s = self, TMP_40.$$arity = -1, TMP_40), $a).call($c)
+      };
+      return nil;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_38.$$arity = -1);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            result = index;
-            return $breaker;
-          }
+    Opal.defn(self, '$first', TMP_43 = function ːfirst(number) {try {
 
-          index += 1;
-        };
-      }
+      var $a, $b, TMP_41, $c, TMP_42, self = this, result = nil, current = nil;
 
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$first', function(number) {
-      var $a, self = this, result = nil;
-
-      if ((($a = number === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
-        result = nil;
-        
-        self.$each.$$p = function() {
-          result = $scope.get('Opal').$destructure(arguments);
-
-          return $breaker;
-        };
-
-        self.$each();
-      ;
+      if ((($a = number === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        return ($a = ($b = self).$each, $a.$$p = (TMP_41 = function(value){var self = TMP_41.$$s || this;
+if (value == null) value = nil;
+        Opal.ret(value)}, TMP_41.$$s = self, TMP_41.$$arity = 1, TMP_41), $a).call($b)
         } else {
         result = [];
         number = $scope.get('Opal').$coerce_to(number, $scope.get('Integer'), "to_int");
-        if ((($a = number < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = number < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('ArgumentError'), "attempt to take negative size")};
-        if ((($a = number == 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = number == 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return []};
-        
-        var current = 0;
-        number = $scope.get('Opal').$coerce_to(number, $scope.get('Integer'), "to_int");
+        current = 0;
+        ($a = ($c = self).$each, $a.$$p = (TMP_42 = function($d_rest){var self = TMP_42.$$s || this, args, $e;
 
-        self.$each.$$p = function() {
-          result.push($scope.get('Opal').$destructure(arguments));
-
-          if (number <= ++current) {
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 0] = arguments[$arg_idx];
           }
-        };
-
-        self.$each();
-      
+        result.push($scope.get('Opal').$destructure(args));
+          if ((($e = number <= ++current) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            Opal.ret(result)
+            } else {
+            return nil
+          };}, TMP_42.$$s = self, TMP_42.$$arity = -1, TMP_42), $a).call($c);
+        return result;
       };
-      return result;
-    });
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_43.$$arity = -1);
 
     Opal.alias(self, 'flat_map', 'collect_concat');
 
-    Opal.defn(self, '$grep', TMP_28 = function(pattern) {
-      var $a, self = this, $iter = TMP_28.$$p, block = $iter || nil;
+    Opal.defn(self, '$grep', TMP_44 = function ːgrep(pattern) {
+      var $a, self = this, $iter = TMP_44.$$p, block = $iter || nil;
 
-      TMP_28.$$p = null;
+      TMP_44.$$p = null;
       
       var result = [];
 
@@ -8369,13 +8657,8 @@ if (item == null) item = nil;
           var param = $scope.get('Opal').$destructure(arguments),
               value = pattern['$==='](param);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = value) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             value = Opal.yield1(block, param);
-
-            if (value === $breaker) {
-              result = $breaker.$v;
-              return $breaker;
-            }
 
             result.push(value);
           }
@@ -8386,7 +8669,7 @@ if (item == null) item = nil;
           var param = $scope.get('Opal').$destructure(arguments),
               value = pattern['$==='](param);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = value) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             result.push(param);
           }
         };
@@ -8396,17 +8679,17 @@ if (item == null) item = nil;
 
       return result;
     ;
-    });
+    }, TMP_44.$$arity = 1);
 
-    Opal.defn(self, '$group_by', TMP_29 = function() {
-      var $a, $b, TMP_30, $c, $d, self = this, $iter = TMP_29.$$p, block = $iter || nil, hash = nil;
+    Opal.defn(self, '$group_by', TMP_45 = function ːgroup_by() {
+      var $a, $b, TMP_46, $c, $d, self = this, $iter = TMP_45.$$p, block = $iter || nil, hash = nil;
 
-      TMP_29.$$p = null;
+      TMP_45.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_30 = function(){var self = TMP_30.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_46 = function(){var self = TMP_46.$$s || this;
 
-        return self.$enumerator_size()}, TMP_30.$$s = self, TMP_30), $a).call($b, "group_by")
+        return self.$enumerator_size()}, TMP_46.$$s = self, TMP_46.$$arity = 0, TMP_46), $a).call($b, "group_by")
       };
       hash = $scope.get('Hash').$new();
       
@@ -8416,12 +8699,7 @@ if (item == null) item = nil;
         var param = $scope.get('Opal').$destructure(arguments),
             value = Opal.yield1(block, param);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        (($a = value, $c = hash, ((($d = $c['$[]']($a)) !== false && $d !== nil) ? $d : $c['$[]=']($a, []))))['$<<'](param);
+        (($a = value, $c = hash, ((($d = $c['$[]']($a)) !== false && $d !== nil && $d != null) ? $d : $c['$[]=']($a, []))))['$<<'](param);
       }
 
       self.$each();
@@ -8431,33 +8709,33 @@ if (item == null) item = nil;
       }
     
       return hash;
-    });
+    }, TMP_45.$$arity = 0);
 
-    Opal.defn(self, '$include?', function(obj) {
-      var self = this;
+    Opal.defn(self, '$include?', TMP_48 = function(obj) {try {
 
-      
-      var result = false;
+      var $a, $b, TMP_47, self = this;
 
-      self.$each.$$p = function() {
-        var param = $scope.get('Opal').$destructure(arguments);
+      ($a = ($b = self).$each, $a.$$p = (TMP_47 = function($c_rest){var self = TMP_47.$$s || this, args;
 
-        if ((param)['$=='](obj)) {
-          result = true;
-          return $breaker;
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
         }
-      }
+      if ($scope.get('Opal').$destructure(args)['$=='](obj)) {
+          Opal.ret(true)
+          } else {
+          return nil
+        }}, TMP_47.$$s = self, TMP_47.$$arity = -1, TMP_47), $a).call($b);
+      return false;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_48.$$arity = 1);
 
-      self.$each();
+    Opal.defn(self, '$inject', TMP_49 = function ːinject(object, sym) {
+      var self = this, $iter = TMP_49.$$p, block = $iter || nil;
 
-      return result;
-    
-    });
-
-    Opal.defn(self, '$inject', TMP_31 = function(object, sym) {
-      var self = this, $iter = TMP_31.$$p, block = $iter || nil;
-
-      TMP_31.$$p = null;
+      TMP_49.$$p = null;
       
       var result = object;
 
@@ -8471,11 +8749,6 @@ if (item == null) item = nil;
           }
 
           value = Opal.yieldX(block, [result, value]);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
-          }
 
           result = value;
         };
@@ -8506,49 +8779,54 @@ if (item == null) item = nil;
 
       return result == undefined ? nil : result;
     ;
-    });
+    }, TMP_49.$$arity = -1);
 
-    Opal.defn(self, '$lazy', function() {
-      var $a, $b, TMP_32, self = this;
+    Opal.defn(self, '$lazy', TMP_51 = function ːlazy() {
+      var $a, $b, TMP_50, self = this;
 
-      return ($a = ($b = (($scope.get('Enumerator')).$$scope.get('Lazy'))).$new, $a.$$p = (TMP_32 = function(enum$, args){var self = TMP_32.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
-      return ($a = enum$).$yield.apply($a, Opal.to_a(args))}, TMP_32.$$s = self, TMP_32), $a).call($b, self, self.$enumerator_size());
-    });
+      return ($a = ($b = (($scope.get('Enumerator')).$$scope.get('Lazy'))).$new, $a.$$p = (TMP_50 = function(enum$, $c_rest){var self = TMP_50.$$s || this, args, $d;
 
-    Opal.defn(self, '$enumerator_size', function() {
+        var $args_len = arguments.length, $rest_len = $args_len - 1;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 1] = arguments[$arg_idx];
+        }if (enum$ == null) enum$ = nil;
+      return ($d = enum$).$yield.apply($d, Opal.to_a(args))}, TMP_50.$$s = self, TMP_50.$$arity = -2, TMP_50), $a).call($b, self, self.$enumerator_size());
+    }, TMP_51.$$arity = 0);
+
+    Opal.defn(self, '$enumerator_size', TMP_52 = function ːenumerator_size() {
       var $a, self = this;
 
-      if ((($a = self['$respond_to?']("size")) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$respond_to?']("size")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$size()
         } else {
         return nil
       };
-    });
+    }, TMP_52.$$arity = 0);
 
     Opal.alias(self, 'map', 'collect');
 
-    Opal.defn(self, '$max', TMP_33 = function() {
-      var self = this, $iter = TMP_33.$$p, block = $iter || nil;
+    Opal.defn(self, '$max', TMP_53 = function ːmax(n) {
+      var $a, $b, self = this, $iter = TMP_53.$$p, block = $iter || nil;
 
-      TMP_33.$$p = null;
+      TMP_53.$$p = null;
       
-      var result;
+      if (n === undefined || n === nil) {
+        var result, value;
 
-      if (block !== nil) {
         self.$each.$$p = function() {
-          var param = $scope.get('Opal').$destructure(arguments);
+          var item = $scope.get('Opal').$destructure(arguments);
 
           if (result === undefined) {
-            result = param;
+            result = item;
             return;
           }
 
-          var value = block(param, result);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          if (block !== nil) {
+            value = Opal.yieldX(block, [item, result]);
+          } else {
+            value = (item)['$<=>'](result);
           }
 
           if (value === nil) {
@@ -8556,40 +8834,32 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
           }
 
           if (value > 0) {
-            result = param;
+            result = item;
           }
-        };
-      }
-      else {
-        self.$each.$$p = function() {
-          var param = $scope.get('Opal').$destructure(arguments);
+        }
 
-          if (result === undefined) {
-            result = param;
-            return;
-          }
+        self.$each();
 
-          if ($scope.get('Opal').$compare(param, result) > 0) {
-            result = param;
-          }
-        };
-      }
-
-      self.$each();
-
-      return result === undefined ? nil : result;
-    
-    });
-
-    Opal.defn(self, '$max_by', TMP_34 = function() {
-      var $a, $b, TMP_35, self = this, $iter = TMP_34.$$p, block = $iter || nil;
-
-      TMP_34.$$p = null;
-      if (block !== false && block !== nil) {
+        if (result === undefined) {
+          return nil;
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_35 = function(){var self = TMP_35.$$s || this;
+          return result;
+        }
+      }
+    
+      n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
+      return ($a = ($b = self).$sort, $a.$$p = block.$to_proc(), $a).call($b).$reverse().$first(n);
+    }, TMP_53.$$arity = -1);
 
-        return self.$enumerator_size()}, TMP_35.$$s = self, TMP_35), $a).call($b, "max_by")
+    Opal.defn(self, '$max_by', TMP_54 = function ːmax_by() {
+      var $a, $b, TMP_55, self = this, $iter = TMP_54.$$p, block = $iter || nil;
+
+      TMP_54.$$p = null;
+      if (block !== false && block !== nil && block != null) {
+        } else {
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_55 = function(){var self = TMP_55.$$s || this;
+
+        return self.$enumerator_size()}, TMP_55.$$s = self, TMP_55.$$arity = 0, TMP_55), $a).call($b, "max_by")
       };
       
       var result,
@@ -8605,11 +8875,6 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
           return;
         }
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
         if ((value)['$<=>'](by) > 0) {
           result = param
           by     = value;
@@ -8620,14 +8885,14 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
 
       return result === undefined ? nil : result;
     
-    });
+    }, TMP_54.$$arity = 0);
 
     Opal.alias(self, 'member?', 'include?');
 
-    Opal.defn(self, '$min', TMP_36 = function() {
-      var self = this, $iter = TMP_36.$$p, block = $iter || nil;
+    Opal.defn(self, '$min', TMP_56 = function ːmin() {
+      var self = this, $iter = TMP_56.$$p, block = $iter || nil;
 
-      TMP_36.$$p = null;
+      TMP_56.$$p = null;
       
       var result;
 
@@ -8641,11 +8906,6 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
           }
 
           var value = block(param, result);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
-          }
 
           if (value === nil) {
             self.$raise($scope.get('ArgumentError'), "comparison failed");
@@ -8675,17 +8935,17 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
 
       return result === undefined ? nil : result;
     
-    });
+    }, TMP_56.$$arity = 0);
 
-    Opal.defn(self, '$min_by', TMP_37 = function() {
-      var $a, $b, TMP_38, self = this, $iter = TMP_37.$$p, block = $iter || nil;
+    Opal.defn(self, '$min_by', TMP_57 = function ːmin_by() {
+      var $a, $b, TMP_58, self = this, $iter = TMP_57.$$p, block = $iter || nil;
 
-      TMP_37.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_57.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_38 = function(){var self = TMP_38.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_58 = function(){var self = TMP_58.$$s || this;
 
-        return self.$enumerator_size()}, TMP_38.$$s = self, TMP_38), $a).call($b, "min_by")
+        return self.$enumerator_size()}, TMP_58.$$s = self, TMP_58.$$arity = 0, TMP_58), $a).call($b, "min_by")
       };
       
       var result,
@@ -8701,11 +8961,6 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
           return;
         }
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
         if ((value)['$<=>'](by) < 0) {
           result = param
           by     = value;
@@ -8716,15 +8971,15 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
 
       return result === undefined ? nil : result;
     
-    });
+    }, TMP_57.$$arity = 0);
 
-    Opal.defn(self, '$minmax', TMP_39 = function() {
-      var $a, $b, $c, TMP_40, self = this, $iter = TMP_39.$$p, block = $iter || nil;
+    Opal.defn(self, '$minmax', TMP_59 = function ːminmax() {
+      var $a, $b, $c, TMP_60, self = this, $iter = TMP_59.$$p, block = $iter || nil;
 
-      TMP_39.$$p = null;
-      ((($a = block) !== false && $a !== nil) ? $a : block = ($b = ($c = self).$proc, $b.$$p = (TMP_40 = function(a, b){var self = TMP_40.$$s || this;
+      TMP_59.$$p = null;
+      ((($a = block) !== false && $a !== nil && $a != null) ? $a : block = ($b = ($c = self).$proc, $b.$$p = (TMP_60 = function(a, b){var self = TMP_60.$$s || this;
 if (a == null) a = nil;if (b == null) b = nil;
-      return a['$<=>'](b)}, TMP_40.$$s = self, TMP_40), $b).call($c));
+      return a['$<=>'](b)}, TMP_60.$$s = self, TMP_60.$$arity = 2, TMP_60), $b).call($c));
       
       var min = nil, max = nil, first_time = true;
 
@@ -8756,110 +9011,111 @@ if (a == null) a = nil;if (b == null) b = nil;
 
       return [min, max];
     
-    });
+    }, TMP_59.$$arity = 0);
 
-    Opal.defn(self, '$minmax_by', TMP_41 = function() {
-      var self = this, $iter = TMP_41.$$p, block = $iter || nil;
+    Opal.defn(self, '$minmax_by', TMP_61 = function ːminmax_by() {
+      var self = this, $iter = TMP_61.$$p, block = $iter || nil;
 
-      TMP_41.$$p = null;
+      TMP_61.$$p = null;
       return self.$raise($scope.get('NotImplementedError'));
-    });
+    }, TMP_61.$$arity = 0);
 
-    Opal.defn(self, '$none?', TMP_42 = function() {
-      var $a, self = this, $iter = TMP_42.$$p, block = $iter || nil;
+    Opal.defn(self, '$none?', TMP_62 = function() {try {
 
-      TMP_42.$$p = null;
-      
-      var result = true;
+      var $a, $b, TMP_63, $c, TMP_64, self = this, $iter = TMP_62.$$p, block = $iter || nil;
 
-      if (block !== nil) {
-        self.$each.$$p = function() {
-          var value = Opal.yieldX(block, arguments);
+      TMP_62.$$p = null;
+      if ((block !== nil)) {
+        ($a = ($b = self).$each, $a.$$p = (TMP_63 = function($c_rest){var self = TMP_63.$$s || this, value, $d;
 
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ((($d = Opal.yieldX(block, Opal.to_a(value))) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            Opal.ret(false)
+            } else {
+            return nil
+          }}, TMP_63.$$s = self, TMP_63.$$arity = -1, TMP_63), $a).call($b)
+        } else {
+        ($a = ($c = self).$each, $a.$$p = (TMP_64 = function($d_rest){var self = TMP_64.$$s || this, value, $e;
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            result = false;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
-        }
-      }
-      else {
-        self.$each.$$p = function() {
-          var value = $scope.get('Opal').$destructure(arguments);
+        if ((($e = $scope.get('Opal').$destructure(value)) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            Opal.ret(false)
+            } else {
+            return nil
+          }}, TMP_64.$$s = self, TMP_64.$$arity = -1, TMP_64), $a).call($c)
+      };
+      return true;
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_62.$$arity = 0);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            result = false;
-            return $breaker;
+    Opal.defn(self, '$one?', TMP_65 = function() {try {
+
+      var $a, $b, TMP_66, $c, TMP_67, self = this, $iter = TMP_65.$$p, block = $iter || nil, count = nil;
+
+      TMP_65.$$p = null;
+      count = 0;
+      if ((block !== nil)) {
+        ($a = ($b = self).$each, $a.$$p = (TMP_66 = function($c_rest){var self = TMP_66.$$s || this, value, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
-        };
-      }
+        if ((($d = Opal.yieldX(block, Opal.to_a(value))) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            count = $rb_plus(count, 1);
+            if ((($d = $rb_gt(count, 1)) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+              Opal.ret(false)
+              } else {
+              return nil
+            };
+            } else {
+            return nil
+          }}, TMP_66.$$s = self, TMP_66.$$arity = -1, TMP_66), $a).call($b)
+        } else {
+        ($a = ($c = self).$each, $a.$$p = (TMP_67 = function($d_rest){var self = TMP_67.$$s || this, value, $e;
 
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$one?', TMP_43 = function() {
-      var $a, self = this, $iter = TMP_43.$$p, block = $iter || nil;
-
-      TMP_43.$$p = null;
-      
-      var result = false;
-
-      if (block !== nil) {
-        self.$each.$$p = function() {
-          var value = Opal.yieldX(block, arguments);
-
-          if (value === $breaker) {
-            result = $breaker.$v;
-            return $breaker;
+          var $args_len = arguments.length, $rest_len = $args_len - 0;
+          if ($rest_len < 0) { $rest_len = 0; }
+          value = new Array($rest_len);
+          for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+            value[$arg_idx - 0] = arguments[$arg_idx];
           }
+        if ((($e = $scope.get('Opal').$destructure(value)) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+            count = $rb_plus(count, 1);
+            if ((($e = $rb_gt(count, 1)) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
+              Opal.ret(false)
+              } else {
+              return nil
+            };
+            } else {
+            return nil
+          }}, TMP_67.$$s = self, TMP_67.$$arity = -1, TMP_67), $a).call($c)
+      };
+      return count['$=='](1);
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_65.$$arity = 0);
 
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            if (result === true) {
-              result = false;
-              return $breaker;
-            }
+    Opal.defn(self, '$partition', TMP_68 = function ːpartition() {
+      var $a, $b, TMP_69, self = this, $iter = TMP_68.$$p, block = $iter || nil;
 
-            result = true;
-          }
-        }
-      }
-      else {
-        self.$each.$$p = function() {
-          var value = $scope.get('Opal').$destructure(arguments);
-
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            if (result === true) {
-              result = false;
-              return $breaker;
-            }
-
-            result = true;
-          }
-        }
-      }
-
-      self.$each();
-
-      return result;
-    
-    });
-
-    Opal.defn(self, '$partition', TMP_44 = function() {
-      var $a, $b, TMP_45, self = this, $iter = TMP_44.$$p, block = $iter || nil;
-
-      TMP_44.$$p = null;
+      TMP_68.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_45 = function(){var self = TMP_45.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_69 = function(){var self = TMP_69.$$s || this;
 
-        return self.$enumerator_size()}, TMP_45.$$s = self, TMP_45), $a).call($b, "partition")
+        return self.$enumerator_size()}, TMP_69.$$s = self, TMP_69.$$arity = 0, TMP_69), $a).call($b, "partition")
       };
       
       var truthy = [], falsy = [], result;
@@ -8868,12 +9124,7 @@ if (a == null) a = nil;if (b == null) b = nil;
         var param = $scope.get('Opal').$destructure(arguments),
             value = Opal.yield1(block, param);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = value) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           truthy.push(param);
         }
         else {
@@ -8885,19 +9136,19 @@ if (a == null) a = nil;if (b == null) b = nil;
 
       return [truthy, falsy];
     
-    });
+    }, TMP_68.$$arity = 0);
 
     Opal.alias(self, 'reduce', 'inject');
 
-    Opal.defn(self, '$reject', TMP_46 = function() {
-      var $a, $b, TMP_47, self = this, $iter = TMP_46.$$p, block = $iter || nil;
+    Opal.defn(self, '$reject', TMP_70 = function ːreject() {
+      var $a, $b, TMP_71, self = this, $iter = TMP_70.$$p, block = $iter || nil;
 
-      TMP_46.$$p = null;
+      TMP_70.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_47 = function(){var self = TMP_47.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_71 = function(){var self = TMP_71.$$s || this;
 
-        return self.$enumerator_size()}, TMP_47.$$s = self, TMP_47), $a).call($b, "reject")
+        return self.$enumerator_size()}, TMP_71.$$s = self, TMP_71.$$arity = 0, TMP_71), $a).call($b, "reject")
       };
       
       var result = [];
@@ -8906,12 +9157,7 @@ if (a == null) a = nil;if (b == null) b = nil;
         var param = $scope.get('Opal').$destructure(arguments),
             value = Opal.yield1(block, param);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
-        if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
+        if ((($a = value) === nil || $a == null || ($a.$$is_boolean && $a == false))) {
           result.push(param);
         }
       };
@@ -8920,17 +9166,17 @@ if (a == null) a = nil;if (b == null) b = nil;
 
       return result;
     
-    });
+    }, TMP_70.$$arity = 0);
 
-    Opal.defn(self, '$reverse_each', TMP_48 = function() {
-      var $a, $b, TMP_49, self = this, $iter = TMP_48.$$p, block = $iter || nil;
+    Opal.defn(self, '$reverse_each', TMP_72 = function ːreverse_each() {
+      var $a, $b, TMP_73, self = this, $iter = TMP_72.$$p, block = $iter || nil;
 
-      TMP_48.$$p = null;
+      TMP_72.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_49 = function(){var self = TMP_49.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_73 = function(){var self = TMP_73.$$s || this;
 
-        return self.$enumerator_size()}, TMP_49.$$s = self, TMP_49), $a).call($b, "reverse_each")
+        return self.$enumerator_size()}, TMP_73.$$s = self, TMP_73.$$arity = 0, TMP_73), $a).call($b, "reverse_each")
       };
       
       var result = [];
@@ -8947,17 +9193,17 @@ if (a == null) a = nil;if (b == null) b = nil;
 
       return result;
     
-    });
+    }, TMP_72.$$arity = 0);
 
     Opal.alias(self, 'select', 'find_all');
 
-    Opal.defn(self, '$slice_before', TMP_50 = function(pattern) {
-      var $a, $b, TMP_51, self = this, $iter = TMP_50.$$p, block = $iter || nil;
+    Opal.defn(self, '$slice_before', TMP_74 = function ːslice_before(pattern) {
+      var $a, $b, TMP_75, self = this, $iter = TMP_74.$$p, block = $iter || nil;
 
-      TMP_50.$$p = null;
-      if ((($a = pattern === undefined && block === nil || arguments.length > 1) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_74.$$p = null;
+      if ((($a = pattern === undefined && block === nil || arguments.length > 1) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (arguments.length) + " for 1)")};
-      return ($a = ($b = $scope.get('Enumerator')).$new, $a.$$p = (TMP_51 = function(e){var self = TMP_51.$$s || this, $a;
+      return ($a = ($b = $scope.get('Enumerator')).$new, $a.$$p = (TMP_75 = function(e){var self = TMP_75.$$s || this, $c;
 if (e == null) e = nil;
       
         var slice = [];
@@ -8968,7 +9214,7 @@ if (e == null) e = nil;
               var param = $scope.get('Opal').$destructure(arguments),
                   value = Opal.yield1(block, param);
 
-              if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true)) && slice.length > 0) {
+              if ((($c = value) !== nil && $c != null && (!$c.$$is_boolean || $c == true)) && slice.length > 0) {
                 e['$<<'](slice);
                 slice = [];
               }
@@ -8981,7 +9227,7 @@ if (e == null) e = nil;
               var param = $scope.get('Opal').$destructure(arguments),
                   value = block(param, pattern.$dup());
 
-              if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true)) && slice.length > 0) {
+              if ((($c = value) !== nil && $c != null && (!$c.$$is_boolean || $c == true)) && slice.length > 0) {
                 e['$<<'](slice);
                 slice = [];
               }
@@ -8995,7 +9241,7 @@ if (e == null) e = nil;
             var param = $scope.get('Opal').$destructure(arguments),
                 value = pattern['$==='](param);
 
-            if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true)) && slice.length > 0) {
+            if ((($c = value) !== nil && $c != null && (!$c.$$is_boolean || $c == true)) && slice.length > 0) {
               e['$<<'](slice);
               slice = [];
             }
@@ -9009,104 +9255,96 @@ if (e == null) e = nil;
         if (slice.length > 0) {
           e['$<<'](slice);
         }
-      ;}, TMP_51.$$s = self, TMP_51), $a).call($b);
-    });
+      ;}, TMP_75.$$s = self, TMP_75.$$arity = 1, TMP_75), $a).call($b);
+    }, TMP_74.$$arity = -1);
 
-    Opal.defn(self, '$sort', TMP_52 = function() {
-      var $a, $b, TMP_53, self = this, $iter = TMP_52.$$p, block = $iter || nil, ary = nil;
+    Opal.defn(self, '$sort', TMP_76 = function ːsort() {
+      var $a, $b, TMP_77, $c, self = this, $iter = TMP_76.$$p, block = $iter || nil, ary = nil;
 
-      TMP_52.$$p = null;
+      TMP_76.$$p = null;
       ary = self.$to_a();
       if ((block !== nil)) {
         } else {
-        block = ($a = ($b = self).$lambda, $a.$$p = (TMP_53 = function(a, b){var self = TMP_53.$$s || this;
+        block = ($a = ($b = self).$lambda, $a.$$p = (TMP_77 = function(a, b){var self = TMP_77.$$s || this;
 if (a == null) a = nil;if (b == null) b = nil;
-        return a['$<=>'](b)}, TMP_53.$$s = self, TMP_53), $a).call($b)
+        return a['$<=>'](b)}, TMP_77.$$s = self, TMP_77.$$arity = 2, TMP_77), $a).call($b)
       };
-      return ary.sort(block);
-    });
+      return ($a = ($c = ary).$sort, $a.$$p = block.$to_proc(), $a).call($c);
+    }, TMP_76.$$arity = 0);
 
-    Opal.defn(self, '$sort_by', TMP_54 = function() {
-      var $a, $b, TMP_55, $c, TMP_56, $d, TMP_57, $e, TMP_58, self = this, $iter = TMP_54.$$p, block = $iter || nil, dup = nil;
+    Opal.defn(self, '$sort_by', TMP_78 = function ːsort_by() {
+      var $a, $b, TMP_79, $c, TMP_80, $d, TMP_81, $e, TMP_82, self = this, $iter = TMP_78.$$p, block = $iter || nil, dup = nil;
 
-      TMP_54.$$p = null;
+      TMP_78.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_55 = function(){var self = TMP_55.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_79 = function(){var self = TMP_79.$$s || this;
 
-        return self.$enumerator_size()}, TMP_55.$$s = self, TMP_55), $a).call($b, "sort_by")
+        return self.$enumerator_size()}, TMP_79.$$s = self, TMP_79.$$arity = 0, TMP_79), $a).call($b, "sort_by")
       };
-      dup = ($a = ($c = self).$map, $a.$$p = (TMP_56 = function(){var self = TMP_56.$$s || this, arg = nil;
+      dup = ($a = ($c = self).$map, $a.$$p = (TMP_80 = function(){var self = TMP_80.$$s || this, $yielded, arg = nil;
 
       arg = $scope.get('Opal').$destructure(arguments);
-        return [block.$call(arg), arg];}, TMP_56.$$s = self, TMP_56), $a).call($c);
-      ($a = ($d = dup)['$sort!'], $a.$$p = (TMP_57 = function(a, b){var self = TMP_57.$$s || this;
+        ($yielded = Opal.yield1(block, arg));return [$yielded, arg];}, TMP_80.$$s = self, TMP_80.$$arity = 0, TMP_80), $a).call($c);
+      ($a = ($d = dup)['$sort!'], $a.$$p = (TMP_81 = function(a, b){var self = TMP_81.$$s || this;
 if (a == null) a = nil;if (b == null) b = nil;
-      return (a[0])['$<=>'](b[0])}, TMP_57.$$s = self, TMP_57), $a).call($d);
-      return ($a = ($e = dup)['$map!'], $a.$$p = (TMP_58 = function(i){var self = TMP_58.$$s || this;
+      return (a[0])['$<=>'](b[0])}, TMP_81.$$s = self, TMP_81.$$arity = 2, TMP_81), $a).call($d);
+      return ($a = ($e = dup)['$map!'], $a.$$p = (TMP_82 = function(i){var self = TMP_82.$$s || this;
 if (i == null) i = nil;
-      return i[1];}, TMP_58.$$s = self, TMP_58), $a).call($e);
-    });
+      return i[1];}, TMP_82.$$s = self, TMP_82.$$arity = 1, TMP_82), $a).call($e);
+    }, TMP_78.$$arity = 0);
 
-    Opal.defn(self, '$take', function(num) {
+    Opal.defn(self, '$take', TMP_83 = function ːtake(num) {
       var self = this;
 
       return self.$first(num);
-    });
+    }, TMP_83.$$arity = 1);
 
-    Opal.defn(self, '$take_while', TMP_59 = function() {
-      var $a, self = this, $iter = TMP_59.$$p, block = $iter || nil;
+    Opal.defn(self, '$take_while', TMP_84 = function ːtake_while() {try {
 
-      TMP_59.$$p = null;
-      if (block !== false && block !== nil) {
+      var $a, $b, TMP_85, self = this, $iter = TMP_84.$$p, block = $iter || nil, result = nil;
+
+      TMP_84.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
         return self.$enum_for("take_while")
       };
-      
-      var result = [];
+      result = [];
+      return ($a = ($b = self).$each, $a.$$p = (TMP_85 = function($c_rest){var self = TMP_85.$$s || this, args, $d, value = nil;
 
-      self.$each.$$p = function() {
-        var param = $scope.get('Opal').$destructure(arguments),
-            value = Opal.yield1(block, param);
-
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
         }
-
-        if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
-          return $breaker;
-        }
-
-        result.push(param);
-      };
-
-      self.$each();
-
-      return result;
-    
-    });
+      value = $scope.get('Opal').$destructure(args);
+        if ((($d = Opal.yield1(block, value)) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+          } else {
+          Opal.ret(result)
+        };
+        return result.push(value);}, TMP_85.$$s = self, TMP_85.$$arity = -1, TMP_85), $a).call($b);
+      } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
+    }, TMP_84.$$arity = 0);
 
     Opal.alias(self, 'to_a', 'entries');
 
-    Opal.defn(self, '$zip', TMP_60 = function() {
-      var $a, self = this, $iter = TMP_60.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$zip', TMP_86 = function ːzip($a_rest) {
+      var $b, self = this, others, $iter = TMP_86.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var others = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        others[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      others = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        others[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_60.$$p = null;
-      return ($a = self.$to_a()).$zip.apply($a, Opal.to_a(others));
-    });
+      TMP_86.$$p = null;
+      return ($b = self.$to_a()).$zip.apply($b, Opal.to_a(others));
+    }, TMP_86.$$arity = -1);
   })($scope.base)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/enumerator"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_plus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
   }
@@ -9121,24 +9359,24 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
     function $Enumerator(){};
     var self = $Enumerator = $klass($base, $super, 'Enumerator', $Enumerator);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_7;
 
     def.size = def.args = def.object = def.method = nil;
     self.$include($scope.get('Enumerable'));
 
     def.$$is_enumerator = true;
 
-    Opal.defs(self, '$for', TMP_1 = function(object, method) {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defs(self, '$for', TMP_1 = function(object, method, $a_rest) {
+      var self = this, args, $iter = TMP_1.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 2;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 2];
-      }
       if (method == null) {
-        method = "each"
+        method = "each";
+      }
+      var $args_len = arguments.length, $rest_len = $args_len - 2;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 2; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 2] = arguments[$arg_idx];
       }
       TMP_1.$$p = null;
       
@@ -9151,18 +9389,18 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
 
       return obj;
     ;
-    });
+    }, TMP_1.$$arity = -2);
 
-    Opal.defn(self, '$initialize', TMP_2 = function() {
-      var $a, $b, self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$initialize', TMP_2 = function ːinitialize($a_rest) {
+      var $b, $c, self = this, $iter = TMP_2.$$p, block = $iter || nil;
 
       TMP_2.$$p = null;
-      if (block !== false && block !== nil) {
-        self.object = ($a = ($b = $scope.get('Generator')).$new, $a.$$p = block.$to_proc(), $a).call($b);
+      if (block !== false && block !== nil && block != null) {
+        self.object = ($b = ($c = $scope.get('Generator')).$new, $b.$$p = block.$to_proc(), $b).call($c);
         self.method = "each";
         self.args = [];
         self.size = arguments[0] || nil;
-        if ((($a = self.size) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = self.size) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           return self.size = $scope.get('Opal').$coerce_to(self.size, $scope.get('Integer'), "to_int")
           } else {
           return nil
@@ -9173,53 +9411,53 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
         self.args = $slice.call(arguments, 2);
         return self.size = nil;
       };
-    });
+    }, TMP_2.$$arity = -1);
 
-    Opal.defn(self, '$each', TMP_3 = function() {
-      var $a, $b, $c, self = this, $iter = TMP_3.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$each', TMP_3 = function ːeach($a_rest) {
+      var $b, $c, $d, self = this, args, $iter = TMP_3.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       TMP_3.$$p = null;
-      if ((($a = ($b = block['$nil?'](), $b !== false && $b !== nil ?args['$empty?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = ($c = block['$nil?'](), $c !== false && $c !== nil && $c != null ?args['$empty?']() : $c)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         return self};
       args = $rb_plus(self.args, args);
-      if ((($a = block['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
-        return ($a = self.$class()).$new.apply($a, [self.object, self.method].concat(Opal.to_a(args)))};
-      return ($b = ($c = self.object).$__send__, $b.$$p = block.$to_proc(), $b).apply($c, [self.method].concat(Opal.to_a(args)));
-    });
+      if ((($b = block['$nil?']()) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        return ($b = self.$class()).$new.apply($b, [self.object, self.method].concat(Opal.to_a(args)))};
+      return ($c = ($d = self.object).$__send__, $c.$$p = block.$to_proc(), $c).apply($d, [self.method].concat(Opal.to_a(args)));
+    }, TMP_3.$$arity = -1);
 
-    Opal.defn(self, '$size', function() {
+    Opal.defn(self, '$size', TMP_4 = function ːsize() {
       var $a, self = this;
 
-      if ((($a = $scope.get('Proc')['$==='](self.size)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Proc')['$==='](self.size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return ($a = self.size).$call.apply($a, Opal.to_a(self.args))
         } else {
         return self.size
       };
-    });
+    }, TMP_4.$$arity = 0);
 
-    Opal.defn(self, '$with_index', TMP_4 = function(offset) {
-      var $a, $b, TMP_5, self = this, $iter = TMP_4.$$p, block = $iter || nil;
+    Opal.defn(self, '$with_index', TMP_5 = function ːwith_index(offset) {
+      var $a, $b, TMP_6, self = this, $iter = TMP_5.$$p, block = $iter || nil;
 
       if (offset == null) {
-        offset = 0
+        offset = 0;
       }
-      TMP_4.$$p = null;
-      if (offset !== false && offset !== nil) {
+      TMP_5.$$p = null;
+      if (offset !== false && offset !== nil && offset != null) {
         offset = $scope.get('Opal').$coerce_to(offset, $scope.get('Integer'), "to_int")
         } else {
         offset = 0
       };
-      if (block !== false && block !== nil) {
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_5 = function(){var self = TMP_5.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_6 = function(){var self = TMP_6.$$s || this;
 
-        return self.$size()}, TMP_5.$$s = self, TMP_5), $a).call($b, "with_index", offset)
+        return self.$size()}, TMP_6.$$s = self, TMP_6.$$arity = 0, TMP_6), $a).call($b, "with_index", offset)
       };
       
       var result, index = offset;
@@ -9228,77 +9466,64 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
         var param = $scope.get('Opal').$destructure(arguments),
             value = block(param, index);
 
-        if (value === $breaker) {
-          result = $breaker.$v;
-          return $breaker;
-        }
-
         index++;
 
         return value;
       }
 
-      self.$each();
-
-      if (result !== undefined) {
-        return result;
-      }
-
-      return self.object;
+      return self.$each();
     
-    });
+    }, TMP_5.$$arity = -1);
 
     Opal.alias(self, 'with_object', 'each_with_object');
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_7 = function ːinspect() {
       var $a, self = this, result = nil;
 
       result = "#<" + (self.$class()) + ": " + (self.object.$inspect()) + ":" + (self.method);
-      if ((($a = self.args['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.args['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         result = $rb_plus(result, "(" + (self.args.$inspect()['$[]']($scope.get('Range').$new(1, -2))) + ")")
       };
       return $rb_plus(result, ">");
-    });
+    }, TMP_7.$$arity = 0);
 
     (function($base, $super) {
       function $Generator(){};
       var self = $Generator = $klass($base, $super, 'Generator', $Generator);
 
-      var def = self.$$proto, $scope = self.$$scope, TMP_6, TMP_7;
+      var def = self.$$proto, $scope = self.$$scope, TMP_8, TMP_9;
 
       def.block = nil;
       self.$include($scope.get('Enumerable'));
 
-      Opal.defn(self, '$initialize', TMP_6 = function() {
-        var self = this, $iter = TMP_6.$$p, block = $iter || nil;
+      Opal.defn(self, '$initialize', TMP_8 = function ːinitialize() {
+        var self = this, $iter = TMP_8.$$p, block = $iter || nil;
 
-        TMP_6.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_8.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('LocalJumpError'), "no block given")
         };
         return self.block = block;
-      });
+      }, TMP_8.$$arity = 0);
 
-      return (Opal.defn(self, '$each', TMP_7 = function() {
-        var $a, $b, self = this, $iter = TMP_7.$$p, block = $iter || nil, yielder = nil, $splat_index = nil;
+      return (Opal.defn(self, '$each', TMP_9 = function ːeach($a_rest) {
+        var $b, $c, self = this, args, $iter = TMP_9.$$p, block = $iter || nil, yielder = nil;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var args = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          args[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
         }
-        TMP_7.$$p = null;
-        yielder = ($a = ($b = $scope.get('Yielder')).$new, $a.$$p = block.$to_proc(), $a).call($b);
+        TMP_9.$$p = null;
+        yielder = ($b = ($c = $scope.get('Yielder')).$new, $b.$$p = block.$to_proc(), $b).call($c);
         
         try {
           args.unshift(yielder);
 
-          if (Opal.yieldX(self.block, args) === $breaker) {
-            return $breaker.$v;
-          }
+          Opal.yieldX(self.block, args);
         }
         catch (e) {
           if (e === $breaker) {
@@ -9310,31 +9535,31 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
         }
       ;
         return self;
-      }), nil) && 'each';
+      }, TMP_9.$$arity = -1), nil) && 'each';
     })($scope.base, null);
 
     (function($base, $super) {
       function $Yielder(){};
       var self = $Yielder = $klass($base, $super, 'Yielder', $Yielder);
 
-      var def = self.$$proto, $scope = self.$$scope, TMP_8;
+      var def = self.$$proto, $scope = self.$$scope, TMP_10, TMP_11, TMP_12;
 
       def.block = nil;
-      Opal.defn(self, '$initialize', TMP_8 = function() {
-        var self = this, $iter = TMP_8.$$p, block = $iter || nil;
+      Opal.defn(self, '$initialize', TMP_10 = function ːinitialize() {
+        var self = this, $iter = TMP_10.$$p, block = $iter || nil;
 
-        TMP_8.$$p = null;
+        TMP_10.$$p = null;
         return self.block = block;
-      });
+      }, TMP_10.$$arity = 0);
 
-      Opal.defn(self, '$yield', function() {
-        var self = this, $splat_index = nil;
+      Opal.defn(self, '$yield', TMP_11 = function($a_rest) {
+        var self = this, values;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var values = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          values[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        values = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          values[$arg_idx - 0] = arguments[$arg_idx];
         }
         
         var value = Opal.yieldX(self.block, values);
@@ -9345,27 +9570,27 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
 
         return value;
       ;
-      });
+      }, TMP_11.$$arity = -1);
 
-      return (Opal.defn(self, '$<<', function() {
-        var $a, self = this, $splat_index = nil;
+      return (Opal.defn(self, '$<<', TMP_12 = function($a_rest) {
+        var $b, self = this, values;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var values = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          values[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        values = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          values[$arg_idx - 0] = arguments[$arg_idx];
         }
-        ($a = self).$yield.apply($a, Opal.to_a(values));
+        ($b = self).$yield.apply($b, Opal.to_a(values));
         return self;
-      }), nil) && '<<';
+      }, TMP_12.$$arity = -1), nil) && '<<';
     })($scope.base, null);
 
     return (function($base, $super) {
       function $Lazy(){};
       var self = $Lazy = $klass($base, $super, 'Lazy', $Lazy);
 
-      var def = self.$$proto, $scope = self.$$scope, TMP_9, TMP_12, TMP_14, TMP_19, TMP_21, TMP_22, TMP_24, TMP_27, TMP_30;
+      var def = self.$$proto, $scope = self.$$scope, TMP_13, TMP_16, TMP_17, TMP_19, TMP_24, TMP_25, TMP_27, TMP_28, TMP_30, TMP_33, TMP_36, TMP_37, TMP_39;
 
       def.enumerator = nil;
       (function($base, $super) {
@@ -9377,90 +9602,103 @@ Opal.modules["corelib/enumerator"] = function(Opal) {
         return nil;
       })($scope.base, $scope.get('Exception'));
 
-      Opal.defn(self, '$initialize', TMP_9 = function(object, size) {
-        var TMP_10, self = this, $iter = TMP_9.$$p, block = $iter || nil;
+      Opal.defn(self, '$initialize', TMP_13 = function ːinitialize(object, size) {
+        var $a, $b, TMP_14, self = this, $iter = TMP_13.$$p, block = $iter || nil;
 
         if (size == null) {
-          size = nil
+          size = nil;
         }
-        TMP_9.$$p = null;
+        TMP_13.$$p = null;
         if ((block !== nil)) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy new without a block")
         };
         self.enumerator = object;
-        return Opal.find_super_dispatcher(self, 'initialize', TMP_9, (TMP_10 = function(yielder, each_args){var self = TMP_10.$$s || this, $a, $b, TMP_11;
-if (yielder == null) yielder = nil;each_args = $slice.call(arguments, 1);
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'initialize', TMP_13, false)), $a.$$p = (TMP_14 = function(yielder, $c_rest){var self = TMP_14.$$s || this, each_args, $d, $e, TMP_15;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          each_args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            each_args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (yielder == null) yielder = nil;
         try {
-          return ($a = ($b = object).$each, $a.$$p = (TMP_11 = function(args){var self = TMP_11.$$s || this;
-args = $slice.call(arguments, 0);
+            return ($d = ($e = object).$each, $d.$$p = (TMP_15 = function($c_rest){var self = TMP_15.$$s || this, args;
+
+              var $args_len = arguments.length, $rest_len = $args_len - 0;
+              if ($rest_len < 0) { $rest_len = 0; }
+              args = new Array($rest_len);
+              for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+                args[$arg_idx - 0] = arguments[$arg_idx];
+              }
             
               args.unshift(yielder);
 
-              if (Opal.yieldX(block, args) === $breaker) {
-                return $breaker;
-              }
-            ;}, TMP_11.$$s = self, TMP_11), $a).apply($b, Opal.to_a(each_args))
-          } catch ($err) {if (Opal.rescue($err, [$scope.get('Exception')])) {
-            try {
-              return nil
-            } finally {
-              Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-            }
-            }else { throw $err; }
-          }}, TMP_10.$$s = self, TMP_10)).apply(self, [size]);
-      });
+              Opal.yieldX(block, args);
+            ;}, TMP_15.$$s = self, TMP_15.$$arity = -1, TMP_15), $d).apply($e, Opal.to_a(each_args))
+          } catch ($err) {
+            if (Opal.rescue($err, [$scope.get('Exception')])) {
+              try {
+                return nil
+              } finally { Opal.pop_exception() }
+            } else { throw $err; }
+          }}, TMP_14.$$s = self, TMP_14.$$arity = -2, TMP_14), $a).call($b, size);
+      }, TMP_13.$$arity = -2);
 
       Opal.alias(self, 'force', 'to_a');
 
-      Opal.defn(self, '$lazy', function() {
+      Opal.defn(self, '$lazy', TMP_16 = function ːlazy() {
         var self = this;
 
         return self;
-      });
+      }, TMP_16.$$arity = 0);
 
-      Opal.defn(self, '$collect', TMP_12 = function() {
-        var $a, $b, TMP_13, self = this, $iter = TMP_12.$$p, block = $iter || nil;
+      Opal.defn(self, '$collect', TMP_17 = function ːcollect() {
+        var $a, $b, TMP_18, self = this, $iter = TMP_17.$$p, block = $iter || nil;
 
-        TMP_12.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_17.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy map without a block")
         };
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_13 = function(enum$, args){var self = TMP_13.$$s || this;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_18 = function(enum$, $c_rest){var self = TMP_18.$$s || this, args;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
         
           var value = Opal.yieldX(block, args);
-
-          if (value === $breaker) {
-            return $breaker;
-          }
 
           enum$.$yield(value);
-        }, TMP_13.$$s = self, TMP_13), $a).call($b, self, self.$enumerator_size());
-      });
+        }, TMP_18.$$s = self, TMP_18.$$arity = -2, TMP_18), $a).call($b, self, self.$enumerator_size());
+      }, TMP_17.$$arity = 0);
 
-      Opal.defn(self, '$collect_concat', TMP_14 = function() {
-        var $a, $b, TMP_15, self = this, $iter = TMP_14.$$p, block = $iter || nil;
+      Opal.defn(self, '$collect_concat', TMP_19 = function ːcollect_concat() {
+        var $a, $b, TMP_20, self = this, $iter = TMP_19.$$p, block = $iter || nil;
 
-        TMP_14.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_19.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy map without a block")
         };
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_15 = function(enum$, args){var self = TMP_15.$$s || this, $a, $b, TMP_16, $c, TMP_17;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_20 = function(enum$, $c_rest){var self = TMP_20.$$s || this, args, $d, $e, TMP_21, $f, TMP_22;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
         
           var value = Opal.yieldX(block, args);
 
-          if (value === $breaker) {
-            return $breaker;
-          }
-
           if ((value)['$respond_to?']("force") && (value)['$respond_to?']("each")) {
-            ($a = ($b = (value)).$each, $a.$$p = (TMP_16 = function(v){var self = TMP_16.$$s || this;
+            ($d = ($e = (value)).$each, $d.$$p = (TMP_21 = function(v){var self = TMP_21.$$s || this;
 if (v == null) v = nil;
-          return enum$.$yield(v)}, TMP_16.$$s = self, TMP_16), $a).call($b)
+          return enum$.$yield(v)}, TMP_21.$$s = self, TMP_21.$$arity = 1, TMP_21), $d).call($e)
           }
           else {
             var array = $scope.get('Opal').$try_convert(value, $scope.get('Array'), "to_ary");
@@ -9469,23 +9707,23 @@ if (v == null) v = nil;
               enum$.$yield(value);
             }
             else {
-              ($a = ($c = (value)).$each, $a.$$p = (TMP_17 = function(v){var self = TMP_17.$$s || this;
+              ($d = ($f = (value)).$each, $d.$$p = (TMP_22 = function(v){var self = TMP_22.$$s || this;
 if (v == null) v = nil;
-          return enum$.$yield(v)}, TMP_17.$$s = self, TMP_17), $a).call($c);
+          return enum$.$yield(v)}, TMP_22.$$s = self, TMP_22.$$arity = 1, TMP_22), $d).call($f);
             }
           }
-        ;}, TMP_15.$$s = self, TMP_15), $a).call($b, self, nil);
-      });
+        ;}, TMP_20.$$s = self, TMP_20.$$arity = -2, TMP_20), $a).call($b, self, nil);
+      }, TMP_19.$$arity = 0);
 
-      Opal.defn(self, '$drop', function(n) {
-        var $a, $b, TMP_18, self = this, current_size = nil, set_size = nil, dropped = nil;
+      Opal.defn(self, '$drop', TMP_24 = function ːdrop(n) {
+        var $a, $b, TMP_23, self = this, current_size = nil, set_size = nil, dropped = nil;
 
         n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
-        if ((($a = $rb_lt(n, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(n, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('ArgumentError'), "attempt to drop negative size")};
         current_size = self.$enumerator_size();
-        set_size = (function() {if ((($a = $scope.get('Integer')['$==='](current_size)) !== nil && (!$a.$$is_boolean || $a == true))) {
-          if ((($a = $rb_lt(n, current_size)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        set_size = (function() {if ((($a = $scope.get('Integer')['$==='](current_size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = $rb_lt(n, current_size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             return n
             } else {
             return current_size
@@ -9494,157 +9732,177 @@ if (v == null) v = nil;
           return current_size
         }; return nil; })();
         dropped = 0;
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_18 = function(enum$, args){var self = TMP_18.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
-        if ((($a = $rb_lt(dropped, n)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_23 = function(enum$, $c_rest){var self = TMP_23.$$s || this, args, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
+        if ((($d = $rb_lt(dropped, n)) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
             return dropped = $rb_plus(dropped, 1)
             } else {
-            return ($a = enum$).$yield.apply($a, Opal.to_a(args))
-          }}, TMP_18.$$s = self, TMP_18), $a).call($b, self, set_size);
-      });
+            return ($d = enum$).$yield.apply($d, Opal.to_a(args))
+          }}, TMP_23.$$s = self, TMP_23.$$arity = -2, TMP_23), $a).call($b, self, set_size);
+      }, TMP_24.$$arity = 1);
 
-      Opal.defn(self, '$drop_while', TMP_19 = function() {
-        var $a, $b, TMP_20, self = this, $iter = TMP_19.$$p, block = $iter || nil, succeeding = nil;
+      Opal.defn(self, '$drop_while', TMP_25 = function ːdrop_while() {
+        var $a, $b, TMP_26, self = this, $iter = TMP_25.$$p, block = $iter || nil, succeeding = nil;
 
-        TMP_19.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_25.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy drop_while without a block")
         };
         succeeding = true;
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_20 = function(enum$, args){var self = TMP_20.$$s || this, $a, $b;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
-        if (succeeding !== false && succeeding !== nil) {
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_26 = function(enum$, $c_rest){var self = TMP_26.$$s || this, args, $d, $e;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
+        if (succeeding !== false && succeeding !== nil && succeeding != null) {
             
             var value = Opal.yieldX(block, args);
 
-            if (value === $breaker) {
-              return $breaker;
-            }
-
-            if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
+            if ((($d = value) === nil || $d == null || ($d.$$is_boolean && $d == false))) {
               succeeding = false;
 
-              ($a = enum$).$yield.apply($a, Opal.to_a(args));
+              ($d = enum$).$yield.apply($d, Opal.to_a(args));
             }
           
             } else {
-            return ($b = enum$).$yield.apply($b, Opal.to_a(args))
-          }}, TMP_20.$$s = self, TMP_20), $a).call($b, self, nil);
-      });
+            return ($e = enum$).$yield.apply($e, Opal.to_a(args))
+          }}, TMP_26.$$s = self, TMP_26.$$arity = -2, TMP_26), $a).call($b, self, nil);
+      }, TMP_25.$$arity = 0);
 
-      Opal.defn(self, '$enum_for', TMP_21 = function(method) {
-        var $a, $b, self = this, $iter = TMP_21.$$p, block = $iter || nil, $splat_index = nil;
+      Opal.defn(self, '$enum_for', TMP_27 = function ːenum_for(method, $a_rest) {
+        var $b, $c, self = this, args, $iter = TMP_27.$$p, block = $iter || nil;
 
-        var array_size = arguments.length - 1;
-        if(array_size < 0) array_size = 0;
-        var args = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          args[$splat_index] = arguments[$splat_index + 1];
-        }
         if (method == null) {
-          method = "each"
+          method = "each";
         }
-        TMP_21.$$p = null;
-        return ($a = ($b = self.$class()).$for, $a.$$p = block.$to_proc(), $a).apply($b, [self, method].concat(Opal.to_a(args)));
-      });
+        var $args_len = arguments.length, $rest_len = $args_len - 1;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 1] = arguments[$arg_idx];
+        }
+        TMP_27.$$p = null;
+        return ($b = ($c = self.$class()).$for, $b.$$p = block.$to_proc(), $b).apply($c, [self, method].concat(Opal.to_a(args)));
+      }, TMP_27.$$arity = -1);
 
-      Opal.defn(self, '$find_all', TMP_22 = function() {
-        var $a, $b, TMP_23, self = this, $iter = TMP_22.$$p, block = $iter || nil;
+      Opal.defn(self, '$find_all', TMP_28 = function ːfind_all() {
+        var $a, $b, TMP_29, self = this, $iter = TMP_28.$$p, block = $iter || nil;
 
-        TMP_22.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_28.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy select without a block")
         };
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_23 = function(enum$, args){var self = TMP_23.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_29 = function(enum$, $c_rest){var self = TMP_29.$$s || this, args, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
         
           var value = Opal.yieldX(block, args);
 
-          if (value === $breaker) {
-            return $breaker;
+          if ((($d = value) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            ($d = enum$).$yield.apply($d, Opal.to_a(args));
           }
-
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            ($a = enum$).$yield.apply($a, Opal.to_a(args));
-          }
-        ;}, TMP_23.$$s = self, TMP_23), $a).call($b, self, nil);
-      });
+        ;}, TMP_29.$$s = self, TMP_29.$$arity = -2, TMP_29), $a).call($b, self, nil);
+      }, TMP_28.$$arity = 0);
 
       Opal.alias(self, 'flat_map', 'collect_concat');
 
-      Opal.defn(self, '$grep', TMP_24 = function(pattern) {
-        var $a, $b, TMP_25, $c, TMP_26, self = this, $iter = TMP_24.$$p, block = $iter || nil;
+      Opal.defn(self, '$grep', TMP_30 = function ːgrep(pattern) {
+        var $a, $b, TMP_31, $c, TMP_32, self = this, $iter = TMP_30.$$p, block = $iter || nil;
 
-        TMP_24.$$p = null;
-        if (block !== false && block !== nil) {
-          return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_25 = function(enum$, args){var self = TMP_25.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        TMP_30.$$p = null;
+        if (block !== false && block !== nil && block != null) {
+          return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_31 = function(enum$, $c_rest){var self = TMP_31.$$s || this, args, $d;
+
+            var $args_len = arguments.length, $rest_len = $args_len - 1;
+            if ($rest_len < 0) { $rest_len = 0; }
+            args = new Array($rest_len);
+            for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+              args[$arg_idx - 1] = arguments[$arg_idx];
+            }if (enum$ == null) enum$ = nil;
           
             var param = $scope.get('Opal').$destructure(args),
                 value = pattern['$==='](param);
 
-            if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+            if ((($d = value) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
               value = Opal.yield1(block, param);
-
-              if (value === $breaker) {
-                return $breaker;
-              }
 
               enum$.$yield(Opal.yield1(block, param));
             }
-          ;}, TMP_25.$$s = self, TMP_25), $a).call($b, self, nil)
+          ;}, TMP_31.$$s = self, TMP_31.$$arity = -2, TMP_31), $a).call($b, self, nil)
           } else {
-          return ($a = ($c = $scope.get('Lazy')).$new, $a.$$p = (TMP_26 = function(enum$, args){var self = TMP_26.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+          return ($a = ($c = $scope.get('Lazy')).$new, $a.$$p = (TMP_32 = function(enum$, $d_rest){var self = TMP_32.$$s || this, args, $e;
+
+            var $args_len = arguments.length, $rest_len = $args_len - 1;
+            if ($rest_len < 0) { $rest_len = 0; }
+            args = new Array($rest_len);
+            for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+              args[$arg_idx - 1] = arguments[$arg_idx];
+            }if (enum$ == null) enum$ = nil;
           
             var param = $scope.get('Opal').$destructure(args),
                 value = pattern['$==='](param);
 
-            if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
+            if ((($e = value) !== nil && $e != null && (!$e.$$is_boolean || $e == true))) {
               enum$.$yield(param);
             }
-          ;}, TMP_26.$$s = self, TMP_26), $a).call($c, self, nil)
+          ;}, TMP_32.$$s = self, TMP_32.$$arity = -2, TMP_32), $a).call($c, self, nil)
         };
-      });
+      }, TMP_30.$$arity = 1);
 
       Opal.alias(self, 'map', 'collect');
 
       Opal.alias(self, 'select', 'find_all');
 
-      Opal.defn(self, '$reject', TMP_27 = function() {
-        var $a, $b, TMP_28, self = this, $iter = TMP_27.$$p, block = $iter || nil;
+      Opal.defn(self, '$reject', TMP_33 = function ːreject() {
+        var $a, $b, TMP_34, self = this, $iter = TMP_33.$$p, block = $iter || nil;
 
-        TMP_27.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_33.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy reject without a block")
         };
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_28 = function(enum$, args){var self = TMP_28.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_34 = function(enum$, $c_rest){var self = TMP_34.$$s || this, args, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
         
           var value = Opal.yieldX(block, args);
 
-          if (value === $breaker) {
-            return $breaker;
+          if ((($d = value) === nil || $d == null || ($d.$$is_boolean && $d == false))) {
+            ($d = enum$).$yield.apply($d, Opal.to_a(args));
           }
+        ;}, TMP_34.$$s = self, TMP_34.$$arity = -2, TMP_34), $a).call($b, self, nil);
+      }, TMP_33.$$arity = 0);
 
-          if ((($a = value) === nil || ($a.$$is_boolean && $a == false))) {
-            ($a = enum$).$yield.apply($a, Opal.to_a(args));
-          }
-        ;}, TMP_28.$$s = self, TMP_28), $a).call($b, self, nil);
-      });
-
-      Opal.defn(self, '$take', function(n) {
-        var $a, $b, TMP_29, self = this, current_size = nil, set_size = nil, taken = nil;
+      Opal.defn(self, '$take', TMP_36 = function ːtake(n) {
+        var $a, $b, TMP_35, self = this, current_size = nil, set_size = nil, taken = nil;
 
         n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
-        if ((($a = $rb_lt(n, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(n, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('ArgumentError'), "attempt to take negative size")};
         current_size = self.$enumerator_size();
-        set_size = (function() {if ((($a = $scope.get('Integer')['$==='](current_size)) !== nil && (!$a.$$is_boolean || $a == true))) {
-          if ((($a = $rb_lt(n, current_size)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        set_size = (function() {if ((($a = $scope.get('Integer')['$==='](current_size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = $rb_lt(n, current_size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             return n
             } else {
             return current_size
@@ -9653,56 +9911,62 @@ if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
           return current_size
         }; return nil; })();
         taken = 0;
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_29 = function(enum$, args){var self = TMP_29.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
-        if ((($a = $rb_lt(taken, n)) !== nil && (!$a.$$is_boolean || $a == true))) {
-            ($a = enum$).$yield.apply($a, Opal.to_a(args));
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_35 = function(enum$, $c_rest){var self = TMP_35.$$s || this, args, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
+        if ((($d = $rb_lt(taken, n)) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            ($d = enum$).$yield.apply($d, Opal.to_a(args));
             return taken = $rb_plus(taken, 1);
             } else {
             return self.$raise($scope.get('StopLazyError'))
-          }}, TMP_29.$$s = self, TMP_29), $a).call($b, self, set_size);
-      });
+          }}, TMP_35.$$s = self, TMP_35.$$arity = -2, TMP_35), $a).call($b, self, set_size);
+      }, TMP_36.$$arity = 1);
 
-      Opal.defn(self, '$take_while', TMP_30 = function() {
-        var $a, $b, TMP_31, self = this, $iter = TMP_30.$$p, block = $iter || nil;
+      Opal.defn(self, '$take_while', TMP_37 = function ːtake_while() {
+        var $a, $b, TMP_38, self = this, $iter = TMP_37.$$p, block = $iter || nil;
 
-        TMP_30.$$p = null;
-        if (block !== false && block !== nil) {
+        TMP_37.$$p = null;
+        if (block !== false && block !== nil && block != null) {
           } else {
           self.$raise($scope.get('ArgumentError'), "tried to call lazy take_while without a block")
         };
-        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_31 = function(enum$, args){var self = TMP_31.$$s || this, $a;
-if (enum$ == null) enum$ = nil;args = $slice.call(arguments, 1);
+        return ($a = ($b = $scope.get('Lazy')).$new, $a.$$p = (TMP_38 = function(enum$, $c_rest){var self = TMP_38.$$s || this, args, $d;
+
+          var $args_len = arguments.length, $rest_len = $args_len - 1;
+          if ($rest_len < 0) { $rest_len = 0; }
+          args = new Array($rest_len);
+          for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+            args[$arg_idx - 1] = arguments[$arg_idx];
+          }if (enum$ == null) enum$ = nil;
         
           var value = Opal.yieldX(block, args);
 
-          if (value === $breaker) {
-            return $breaker;
-          }
-
-          if ((($a = value) !== nil && (!$a.$$is_boolean || $a == true))) {
-            ($a = enum$).$yield.apply($a, Opal.to_a(args));
+          if ((($d = value) !== nil && $d != null && (!$d.$$is_boolean || $d == true))) {
+            ($d = enum$).$yield.apply($d, Opal.to_a(args));
           }
           else {
             self.$raise($scope.get('StopLazyError'));
           }
-        ;}, TMP_31.$$s = self, TMP_31), $a).call($b, self, nil);
-      });
+        ;}, TMP_38.$$s = self, TMP_38.$$arity = -2, TMP_38), $a).call($b, self, nil);
+      }, TMP_37.$$arity = 0);
 
       Opal.alias(self, 'to_enum', 'enum_for');
 
-      return (Opal.defn(self, '$inspect', function() {
+      return (Opal.defn(self, '$inspect', TMP_39 = function ːinspect() {
         var self = this;
 
         return "#<" + (self.$class()) + ": " + (self.enumerator.$inspect()) + ">";
-      }), nil) && 'inspect';
+      }, TMP_39.$$arity = 0), nil) && 'inspect';
     })($scope.base, self);
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/numeric"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_minus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs - rhs : lhs['$-'](rhs);
   }
@@ -9726,70 +9990,69 @@ Opal.modules["corelib/numeric"] = function(Opal) {
     function $Numeric(){};
     var self = $Numeric = $klass($base, $super, 'Numeric', $Numeric);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_36;
 
     self.$include($scope.get('Comparable'));
 
-    Opal.defn(self, '$coerce', function(other) {
+    Opal.defn(self, '$coerce', TMP_1 = function ːcoerce(other) {
       var $a, self = this;
 
-      if ((($a = other['$instance_of?'](self.$class())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other['$instance_of?'](self.$class())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return [other, self]};
       return [self.$Float(other), self.$Float(self)];
-    });
+    }, TMP_1.$$arity = 1);
 
-    Opal.defn(self, '$__coerced__', function(method, other) {
+    Opal.defn(self, '$__coerced__', TMP_2 = function ː__coerced__(method, other) {
       var $a, $b, self = this, a = nil, b = nil, $case = nil;
 
       try {
-      $b = other.$coerce(self), $a = Opal.to_ary($b), a = ($a[0] == null ? nil : $a[0]), b = ($a[1] == null ? nil : $a[1]), $b
-      } catch ($err) {if (true) {
-        try {
-          $case = method;if ("+"['$===']($case) || "-"['$===']($case) || "*"['$===']($case) || "/"['$===']($case) || "%"['$===']($case) || "&"['$===']($case) || "|"['$===']($case) || "^"['$===']($case) || "**"['$===']($case)) {self.$raise($scope.get('TypeError'), "" + (other.$class()) + " can't be coerce into Numeric")}else if (">"['$===']($case) || ">="['$===']($case) || "<"['$===']($case) || "<="['$===']($case) || "<=>"['$===']($case)) {self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")}
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
+        $b = other.$coerce(self), $a = Opal.to_ary($b), a = ($a[0] == null ? nil : $a[0]), b = ($a[1] == null ? nil : $a[1]), $b
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('StandardError')])) {
+          try {
+            $case = method;if ("+"['$===']($case) || "-"['$===']($case) || "*"['$===']($case) || "/"['$===']($case) || "%"['$===']($case) || "&"['$===']($case) || "|"['$===']($case) || "^"['$===']($case) || "**"['$===']($case)) {self.$raise($scope.get('TypeError'), "" + (other.$class()) + " can't be coerce into Numeric")}else if (">"['$===']($case) || ">="['$===']($case) || "<"['$===']($case) || "<="['$===']($case) || "<=>"['$===']($case)) {self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (other.$class()) + " failed")}
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
       };
       return a.$__send__(method, b);
-    });
+    }, TMP_2.$$arity = 2);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_3 = function(other) {
       var $a, self = this;
 
-      if ((($a = self['$equal?'](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$equal?'](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return 0};
       return nil;
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$[]', function(bit) {
+    Opal.defn(self, '$[]', TMP_4 = function(bit) {
       var self = this, min = nil, max = nil;
 
       bit = $scope.get('Opal')['$coerce_to!'](bit, $scope.get('Integer'), "to_int");
       min = ((2)['$**'](30))['$-@']();
       max = $rb_minus(((2)['$**'](30)), 1);
       return (bit < min || bit > max) ? 0 : (self >> bit) % 2;
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$+@', function() {
+    Opal.defn(self, '$+@', TMP_5 = function() {
       var self = this;
 
       return self;
-    });
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$-@', function() {
+    Opal.defn(self, '$-@', TMP_6 = function() {
       var self = this;
 
       return $rb_minus(0, self);
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$%', function(other) {
+    Opal.defn(self, '$%', TMP_7 = function(other) {
       var self = this;
 
       return $rb_minus(self, $rb_times(other, self.$div(other)));
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$abs', function() {
+    Opal.defn(self, '$abs', TMP_8 = function ːabs() {
       var self = this;
 
       if ($rb_lt(self, 0)) {
@@ -9797,15 +10060,15 @@ Opal.modules["corelib/numeric"] = function(Opal) {
         } else {
         return self
       };
-    });
+    }, TMP_8.$$arity = 0);
 
-    Opal.defn(self, '$abs2', function() {
+    Opal.defn(self, '$abs2', TMP_9 = function ːabs2() {
       var self = this;
 
       return $rb_times(self, self);
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$angle', function() {
+    Opal.defn(self, '$angle', TMP_10 = function ːangle() {
       var self = this;
 
       if ($rb_lt(self, 0)) {
@@ -9813,237 +10076,248 @@ Opal.modules["corelib/numeric"] = function(Opal) {
         } else {
         return 0
       };
-    });
+    }, TMP_10.$$arity = 0);
 
     Opal.alias(self, 'arg', 'angle');
 
-    Opal.defn(self, '$ceil', function() {
+    Opal.defn(self, '$ceil', TMP_11 = function ːceil() {
       var self = this;
 
       return self.$to_f().$ceil();
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$conj', function() {
+    Opal.defn(self, '$conj', TMP_12 = function ːconj() {
       var self = this;
 
       return self;
-    });
+    }, TMP_12.$$arity = 0);
 
     Opal.alias(self, 'conjugate', 'conj');
 
-    Opal.defn(self, '$denominator', function() {
+    Opal.defn(self, '$denominator', TMP_13 = function ːdenominator() {
       var self = this;
 
       return self.$to_r().$denominator();
-    });
+    }, TMP_13.$$arity = 0);
 
-    Opal.defn(self, '$div', function(other) {
+    Opal.defn(self, '$div', TMP_14 = function ːdiv(other) {
       var self = this;
 
       if (other['$=='](0)) {
         self.$raise($scope.get('ZeroDivisionError'), "divided by o")};
       return ($rb_divide(self, other)).$floor();
-    });
+    }, TMP_14.$$arity = 1);
 
-    Opal.defn(self, '$divmod', function(other) {
+    Opal.defn(self, '$divmod', TMP_15 = function ːdivmod(other) {
       var self = this;
 
       return [self.$div(other), self['$%'](other)];
-    });
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$fdiv', function(other) {
+    Opal.defn(self, '$fdiv', TMP_16 = function ːfdiv(other) {
       var self = this;
 
       return $rb_divide(self.$to_f(), other);
-    });
+    }, TMP_16.$$arity = 1);
 
-    Opal.defn(self, '$floor', function() {
+    Opal.defn(self, '$floor', TMP_17 = function ːfloor() {
       var self = this;
 
       return self.$to_f().$floor();
-    });
+    }, TMP_17.$$arity = 0);
 
-    Opal.defn(self, '$i', function() {
+    Opal.defn(self, '$i', TMP_18 = function ːi() {
       var self = this;
 
       return self.$Complex(0, self);
-    });
+    }, TMP_18.$$arity = 0);
 
-    Opal.defn(self, '$imag', function() {
+    Opal.defn(self, '$imag', TMP_19 = function ːimag() {
       var self = this;
 
       return 0;
-    });
+    }, TMP_19.$$arity = 0);
 
     Opal.alias(self, 'imaginary', 'imag');
 
-    Opal.defn(self, '$integer?', function() {
+    Opal.defn(self, '$integer?', TMP_20 = function() {
       var self = this;
 
       return false;
-    });
+    }, TMP_20.$$arity = 0);
 
     Opal.alias(self, 'magnitude', 'abs');
 
     Opal.alias(self, 'modulo', '%');
 
-    Opal.defn(self, '$nonzero?', function() {
+    Opal.defn(self, '$nonzero?', TMP_21 = function() {
       var $a, self = this;
 
-      if ((($a = self['$zero?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$zero?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return nil
         } else {
         return self
       };
-    });
+    }, TMP_21.$$arity = 0);
 
-    Opal.defn(self, '$numerator', function() {
+    Opal.defn(self, '$numerator', TMP_22 = function ːnumerator() {
       var self = this;
 
       return self.$to_r().$numerator();
-    });
+    }, TMP_22.$$arity = 0);
 
     Opal.alias(self, 'phase', 'arg');
 
-    Opal.defn(self, '$polar', function() {
+    Opal.defn(self, '$polar', TMP_23 = function ːpolar() {
       var self = this;
 
       return [self.$abs(), self.$arg()];
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$quo', function(other) {
+    Opal.defn(self, '$quo', TMP_24 = function ːquo(other) {
       var self = this;
 
       return $rb_divide($scope.get('Opal')['$coerce_to!'](self, $scope.get('Rational'), "to_r"), other);
-    });
+    }, TMP_24.$$arity = 1);
 
-    Opal.defn(self, '$real', function() {
+    Opal.defn(self, '$real', TMP_25 = function ːreal() {
       var self = this;
 
       return self;
-    });
+    }, TMP_25.$$arity = 0);
 
-    Opal.defn(self, '$real?', function() {
+    Opal.defn(self, '$real?', TMP_26 = function() {
       var self = this;
 
       return true;
-    });
+    }, TMP_26.$$arity = 0);
 
-    Opal.defn(self, '$rect', function() {
+    Opal.defn(self, '$rect', TMP_27 = function ːrect() {
       var self = this;
 
       return [self, 0];
-    });
+    }, TMP_27.$$arity = 0);
 
     Opal.alias(self, 'rectangular', 'rect');
 
-    Opal.defn(self, '$round', function(digits) {
+    Opal.defn(self, '$round', TMP_28 = function ːround(digits) {
       var self = this;
 
       return self.$to_f().$round(digits);
-    });
+    }, TMP_28.$$arity = -1);
 
-    Opal.defn(self, '$to_c', function() {
+    Opal.defn(self, '$to_c', TMP_29 = function ːto_c() {
       var self = this;
 
       return self.$Complex(self, 0);
-    });
+    }, TMP_29.$$arity = 0);
 
-    Opal.defn(self, '$to_int', function() {
+    Opal.defn(self, '$to_int', TMP_30 = function ːto_int() {
       var self = this;
 
       return self.$to_i();
-    });
+    }, TMP_30.$$arity = 0);
 
-    Opal.defn(self, '$truncate', function() {
+    Opal.defn(self, '$truncate', TMP_31 = function ːtruncate() {
       var self = this;
 
       return self.$to_f().$truncate();
-    });
+    }, TMP_31.$$arity = 0);
 
-    Opal.defn(self, '$zero?', function() {
+    Opal.defn(self, '$zero?', TMP_32 = function() {
       var self = this;
 
       return self['$=='](0);
-    });
+    }, TMP_32.$$arity = 0);
 
-    Opal.defn(self, '$positive?', function() {
+    Opal.defn(self, '$positive?', TMP_33 = function() {
       var self = this;
 
       return $rb_gt(self, 0);
-    });
+    }, TMP_33.$$arity = 0);
 
-    Opal.defn(self, '$negative?', function() {
+    Opal.defn(self, '$negative?', TMP_34 = function() {
       var self = this;
 
       return $rb_lt(self, 0);
-    });
+    }, TMP_34.$$arity = 0);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_35 = function ːdup() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't dup " + (self.$class()));
-    });
+    }, TMP_35.$$arity = 0);
 
-    return (Opal.defn(self, '$clone', function() {
+    return (Opal.defn(self, '$clone', TMP_36 = function ːclone() {
       var self = this;
 
       return self.$raise($scope.get('TypeError'), "can't clone " + (self.$class()));
-    }), nil) && 'clone';
+    }, TMP_36.$$arity = 0), nil) && 'clone';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/array"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
   function $rb_times(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs * rhs : lhs['$*'](rhs);
   }
+  function $rb_ge(lhs, rhs) {
+    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs >= rhs : lhs['$>='](rhs);
+  }
   function $rb_lt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs < rhs : lhs['$<'](rhs);
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $hash2 = Opal.hash2, $gvars = Opal.gvars;
 
-  Opal.add_stubs(['$require', '$include', '$raise', '$===', '$to_a', '$respond_to?', '$to_ary', '$coerce_to', '$initialize', '$to_proc', '$coerce_to?', '$join', '$to_str', '$class', '$clone', '$hash', '$<=>', '$==', '$object_id', '$inspect', '$enum_for', '$coerce_to!', '$>', '$*', '$enumerator_size', '$empty?', '$copy_singleton_methods', '$initialize_clone', '$initialize_dup', '$replace', '$size', '$eql?', '$length', '$begin', '$end', '$exclude_end?', '$flatten', '$__id__', '$[]', '$to_s', '$new', '$!', '$delete_if', '$each', '$reverse', '$rotate', '$rand', '$at', '$keep_if', '$shuffle!', '$dup', '$<', '$sort', '$!=', '$times', '$[]=', '$<<', '$kind_of?', '$last', '$first', '$upto']);
+  Opal.add_stubs(['$require', '$include', '$to_a', '$raise', '$===', '$replace', '$respond_to?', '$to_ary', '$coerce_to', '$coerce_to?', '$join', '$to_str', '$class', '$clone', '$hash', '$<=>', '$==', '$object_id', '$inspect', '$enum_for', '$coerce_to!', '$>', '$*', '$enumerator_size', '$empty?', '$size', '$eql?', '$length', '$begin', '$end', '$exclude_end?', '$flatten', '$__id__', '$[]', '$to_s', '$new', '$!', '$>=', '$**', '$delete_if', '$to_proc', '$each', '$reverse', '$rotate', '$rand', '$at', '$keep_if', '$shuffle!', '$dup', '$<', '$sort', '$sort_by', '$!=', '$times', '$[]=', '$<<', '$values', '$kind_of?', '$last', '$first', '$upto', '$reject', '$pristine']);
   self.$require("corelib/enumerable");
   self.$require("corelib/numeric");
   return (function($base, $super) {
     function $Array(){};
     var self = $Array = $klass($base, $super, 'Array', $Array);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_6, TMP_8, TMP_10, TMP_12, TMP_13, TMP_15, TMP_17, TMP_19, TMP_20, TMP_21, TMP_22, TMP_24, TMP_26, TMP_27, TMP_29, TMP_31, TMP_33, TMP_34, TMP_36, TMP_38, TMP_39, TMP_40, TMP_43, TMP_44, TMP_47;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_19, TMP_20, TMP_21, TMP_22, TMP_24, TMP_26, TMP_28, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_37, TMP_38, TMP_39, TMP_41, TMP_43, TMP_44, TMP_45, TMP_46, TMP_47, TMP_48, TMP_49, TMP_50, TMP_51, TMP_52, TMP_53, TMP_54, TMP_55, TMP_56, TMP_58, TMP_59, TMP_60, TMP_62, TMP_64, TMP_65, TMP_66, TMP_67, TMP_68, TMP_70, TMP_72, TMP_73, TMP_74, TMP_75, TMP_77, TMP_78, TMP_79, TMP_82, TMP_83, TMP_85, TMP_87, TMP_88, TMP_89, TMP_90, TMP_91, TMP_92, TMP_93, TMP_95, TMP_96, TMP_97, TMP_98, TMP_101, TMP_102, TMP_103, TMP_104, TMP_107, TMP_108, TMP_109, TMP_111;
 
     def.length = nil;
     self.$include($scope.get('Enumerable'));
 
     def.$$is_array = true;
 
-    Opal.defs(self, '$[]', function() {
-      var self = this, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 0];
+    
+    function toArraySubclass(obj, klass) {
+      if (klass.$$name === Opal.Array) {
+        return obj;
+      } else {
+        return klass.$allocate().$replace((obj).$to_a());
       }
-      return objects;
-    });
+    }
+  
 
-    Opal.defn(self, '$initialize', TMP_1 = function(size, obj) {
-      var $a, self = this, $iter = TMP_1.$$p, block = $iter || nil;
+    Opal.defs(self, '$[]', TMP_1 = function($a_rest) {
+      var self = this, objects;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      objects = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        objects[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      return toArraySubclass(objects, self);
+    }, TMP_1.$$arity = -1);
+
+    Opal.defn(self, '$initialize', TMP_2 = function ːinitialize(size, obj) {
+      var $a, self = this, $iter = TMP_2.$$p, block = $iter || nil;
 
       if (size == null) {
-        size = nil
+        size = nil;
       }
       if (obj == null) {
-        obj = nil
+        obj = nil;
       }
-      TMP_1.$$p = null;
-      if ((($a = arguments.length > 2) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_2.$$p = null;
+      if ((($a = arguments.length > 2) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (arguments.length) + " for 0..2)")};
       
       if (arguments.length === 0) {
@@ -10051,13 +10325,15 @@ Opal.modules["corelib/array"] = function(Opal) {
         return self;
       }
     
-      if ((($a = arguments.length === 1) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = $scope.get('Array')['$==='](size)) !== nil && (!$a.$$is_boolean || $a == true))) {
-          return size.$to_a()
-        } else if ((($a = size['$respond_to?']("to_ary")) !== nil && (!$a.$$is_boolean || $a == true))) {
-          return size.$to_ary()}};
+      if ((($a = arguments.length === 1) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $scope.get('Array')['$==='](size)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$replace(size.$to_a());
+          return self;
+        } else if ((($a = size['$respond_to?']("to_ary")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$replace(size.$to_ary());
+          return self;}};
       size = $scope.get('Opal').$coerce_to(size, $scope.get('Integer'), "to_int");
-      if ((($a = size < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = size < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "negative array size")};
       
       self.splice(0, self.length);
@@ -10071,42 +10347,24 @@ Opal.modules["corelib/array"] = function(Opal) {
       else {
         for (i = 0, value; i < size; i++) {
           value = block(i);
-
-          if (value === $breaker) {
-            return $breaker.$v;
-          }
-
           self[i] = value;
         }
       }
 
       return self;
     
-    });
+    }, TMP_2.$$arity = -1);
 
-    Opal.defs(self, '$new', TMP_2 = function() {
-      var $a, $b, self = this, $iter = TMP_2.$$p, block = $iter || nil, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
-      }
-      TMP_2.$$p = null;
-      return ($a = ($b = []).$initialize, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
-    });
-
-    Opal.defs(self, '$try_convert', function(obj) {
+    Opal.defs(self, '$try_convert', TMP_3 = function ːtry_convert(obj) {
       var self = this;
 
       return $scope.get('Opal')['$coerce_to?'](obj, $scope.get('Array'), "to_ary");
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$&', function(other) {
+    Opal.defn(self, '$&', TMP_4 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
@@ -10127,12 +10385,12 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     ;
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$|', function(other) {
+    Opal.defn(self, '$|', TMP_5 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
@@ -10150,54 +10408,51 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return hash.$keys();
     ;
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$*', function(other) {
+    Opal.defn(self, '$*', TMP_6 = function(other) {
       var $a, self = this;
 
-      if ((($a = other['$respond_to?']("to_str")) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other['$respond_to?']("to_str")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$join(other.$to_str())};
-      if ((($a = other['$respond_to?']("to_int")) !== nil && (!$a.$$is_boolean || $a == true))) {
-        } else {
-        self.$raise($scope.get('TypeError'), "no implicit conversion of " + (other.$class()) + " into Integer")
-      };
       other = $scope.get('Opal').$coerce_to(other, $scope.get('Integer'), "to_int");
-      if ((($a = other < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "negative argument")};
       
-      var result = [];
+      var result = [],
+          converted = self.$to_a();
 
       for (var i = 0; i < other; i++) {
-        result = result.concat(self);
+        result = result.concat(converted);
       }
 
-      return result;
-    
-    });
+      return toArraySubclass(result, self.$class());
+    ;
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_7 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
       };
       return self.concat(other);
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$-', function(other) {
+    Opal.defn(self, '$-', TMP_8 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
       };
-      if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return []};
-      if ((($a = other.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
-        return self.$clone()};
+      if ((($a = other.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        return self.$clone().$to_a()};
       
       var result = [], hash = $hash2([], {}), i, length, item;
 
@@ -10214,21 +10469,21 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     ;
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$<<', function(object) {
+    Opal.defn(self, '$<<', TMP_9 = function(object) {
       var self = this;
 
       self.push(object);
       return self;
-    });
+    }, TMP_9.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_10 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
-      } else if ((($a = other['$respond_to?']("to_ary")) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = other['$respond_to?']("to_ary")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_ary().$to_a()
         } else {
         return nil
@@ -10250,9 +10505,9 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return (self.length)['$<=>'](other.length);
     ;
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_11 = function(other) {
       var self = this;
 
       
@@ -10273,9 +10528,9 @@ Opal.modules["corelib/array"] = function(Opal) {
         }
 
         if (array.constructor !== Array)
-          array = array.literal;
+          array = (array).$to_a();
         if (other.constructor !== Array)
-          other = other.literal;
+          other = (other).$to_a();
 
         if (array.length !== other.length) {
           return false;
@@ -10307,14 +10562,14 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return _eqeq(self, other);
     ;
-    });
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$[]', function(index, length) {
+    Opal.defn(self, '$[]', TMP_12 = function(index, length) {
       var self = this;
 
       
       var size = self.length,
-          exclude, from, to;
+          exclude, from, to, result;
 
       if (index.$$is_range) {
         exclude = index.exclude;
@@ -10345,7 +10600,7 @@ Opal.modules["corelib/array"] = function(Opal) {
           to += 1;
         }
 
-        return self.slice(from, to);
+        result = self.slice(from, to)
       }
       else {
         index = $scope.get('Opal').$coerce_to(index, $scope.get('Integer'), "to_int");
@@ -10372,22 +10627,24 @@ Opal.modules["corelib/array"] = function(Opal) {
             return nil;
           }
 
-          return self.slice(index, index + length);
+          result = self.slice(index, index + length);
         }
       }
-    
-    });
 
-    Opal.defn(self, '$[]=', function(index, value, extra) {
+      return toArraySubclass(result, self.$class())
+    ;
+    }, TMP_12.$$arity = -2);
+
+    Opal.defn(self, '$[]=', TMP_13 = function(index, value, extra) {
       var $a, self = this, data = nil, length = nil;
 
       
       var i, size = self.length;
     
-      if ((($a = $scope.get('Range')['$==='](index)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = $scope.get('Array')['$==='](value)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Range')['$==='](index)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $scope.get('Array')['$==='](value)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           data = value.$to_a()
-        } else if ((($a = value['$respond_to?']("to_ary")) !== nil && (!$a.$$is_boolean || $a == true))) {
+        } else if ((($a = value['$respond_to?']("to_ary")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           data = value.$to_ary().$to_a()
           } else {
           data = [value]
@@ -10429,14 +10686,14 @@ Opal.modules["corelib/array"] = function(Opal) {
         return value;
       ;
         } else {
-        if ((($a = extra === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = extra === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           length = 1
           } else {
           length = value;
           value = extra;
-          if ((($a = $scope.get('Array')['$==='](value)) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = $scope.get('Array')['$==='](value)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             data = value.$to_a()
-          } else if ((($a = value['$respond_to?']("to_ary")) !== nil && (!$a.$$is_boolean || $a == true))) {
+          } else if ((($a = value['$respond_to?']("to_ary")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             data = value.$to_ary().$to_a()
             } else {
             data = [value]
@@ -10477,9 +10734,9 @@ Opal.modules["corelib/array"] = function(Opal) {
         return value;
       
       };
-    });
+    }, TMP_13.$$arity = -3);
 
-    Opal.defn(self, '$assoc', function(object) {
+    Opal.defn(self, '$assoc', TMP_14 = function ːassoc(object) {
       var self = this;
 
       
@@ -10491,9 +10748,9 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_14.$$arity = 1);
 
-    Opal.defn(self, '$at', function(index) {
+    Opal.defn(self, '$at', TMP_15 = function ːat(index) {
       var self = this;
 
       index = $scope.get('Opal').$coerce_to(index, $scope.get('Integer'), "to_int");
@@ -10508,12 +10765,12 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self[index];
     
-    });
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$bsearch', TMP_3 = function() {
-      var self = this, $iter = TMP_3.$$p, block = $iter || nil;
+    Opal.defn(self, '$bsearch', TMP_16 = function ːbsearch() {
+      var self = this, $iter = TMP_16.$$p, block = $iter || nil;
 
-      TMP_3.$$p = null;
+      TMP_16.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("bsearch")
@@ -10532,10 +10789,7 @@ Opal.modules["corelib/array"] = function(Opal) {
         val = self[mid];
         ret = block(val);
 
-        if (ret === $breaker) {
-          return $breaker.$v;
-        }
-        else if (ret === true) {
+        if (ret === true) {
           satisfied = val;
           smaller = true;
         }
@@ -10555,31 +10809,31 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return satisfied;
     
-    });
+    }, TMP_16.$$arity = 0);
 
-    Opal.defn(self, '$cycle', TMP_4 = function(n) {
-      var $a, $b, TMP_5, $c, self = this, $iter = TMP_4.$$p, block = $iter || nil;
+    Opal.defn(self, '$cycle', TMP_17 = function ːcycle(n) {
+      var $a, $b, TMP_18, $c, self = this, $iter = TMP_17.$$p, block = $iter || nil;
 
       if (n == null) {
-        n = nil
+        n = nil;
       }
-      TMP_4.$$p = null;
+      TMP_17.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_5 = function(){var self = TMP_5.$$s || this, $a;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_18 = function(){var self = TMP_18.$$s || this, $c;
 
         if (n['$=='](nil)) {
             return (($scope.get('Float')).$$scope.get('INFINITY'))
             } else {
             n = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
-            if ((($a = $rb_gt(n, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+            if ((($c = $rb_gt(n, 0)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
               return $rb_times(self.$enumerator_size(), n)
               } else {
               return 0
             };
-          }}, TMP_5.$$s = self, TMP_5), $a).call($b, "cycle", n)
+          }}, TMP_18.$$s = self, TMP_18.$$arity = 0, TMP_18), $a).call($b, "cycle", n)
       };
-      if ((($a = ((($c = self['$empty?']()) !== false && $c !== nil) ? $c : n['$=='](0))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($c = self['$empty?']()) !== false && $c !== nil && $c != null) ? $c : n['$=='](0))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return nil};
       
       var i, length, value;
@@ -10588,10 +10842,6 @@ Opal.modules["corelib/array"] = function(Opal) {
         while (true) {
           for (i = 0, length = self.length; i < length; i++) {
             value = Opal.yield1(block, self[i]);
-
-            if (value === $breaker) {
-              return $breaker.$v;
-            }
           }
         }
       }
@@ -10604,10 +10854,6 @@ Opal.modules["corelib/array"] = function(Opal) {
         while (n > 0) {
           for (i = 0, length = self.length; i < length; i++) {
             value = Opal.yield1(block, self[i]);
-
-            if (value === $breaker) {
-              return $breaker.$v;
-            }
           }
 
           n--;
@@ -10615,88 +10861,80 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_17.$$arity = -1);
 
-    Opal.defn(self, '$clear', function() {
+    Opal.defn(self, '$clear', TMP_19 = function ːclear() {
       var self = this;
 
       self.splice(0, self.length);
       return self;
-    });
+    }, TMP_19.$$arity = 0);
 
-    Opal.defn(self, '$clone', function() {
-      var self = this, copy = nil;
+    Opal.defn(self, '$count', TMP_20 = function ːcount(object) {
+      var $a, $b, self = this, $iter = TMP_20.$$p, block = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      copy = [];
-      copy.$copy_singleton_methods(self);
-      copy.$initialize_clone(self);
-      return copy;
-    });
+      if (object == null) {
+        object = nil;
+      }
+      TMP_20.$$p = null;
+      $zuper = [];
+      
+      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
+        $zuper[$zuper_index] = arguments[$zuper_index];
+      }
+      if ((($a = ((($b = object) !== false && $b !== nil && $b != null) ? $b : block)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'count', TMP_20, false)), $a.$$p = $iter, $a).apply($b, $zuper)
+        } else {
+        return self.$size()
+      };
+    }, TMP_20.$$arity = -1);
 
-    Opal.defn(self, '$dup', function() {
-      var self = this, copy = nil;
-
-      copy = [];
-      copy.$initialize_dup(self);
-      return copy;
-    });
-
-    Opal.defn(self, '$initialize_copy', function(other) {
+    Opal.defn(self, '$initialize_copy', TMP_21 = function ːinitialize_copy(other) {
       var self = this;
 
       return self.$replace(other);
-    });
+    }, TMP_21.$$arity = 1);
 
-    Opal.defn(self, '$collect', TMP_6 = function() {
-      var $a, $b, TMP_7, self = this, $iter = TMP_6.$$p, block = $iter || nil;
+    Opal.defn(self, '$collect', TMP_22 = function ːcollect() {
+      var $a, $b, TMP_23, self = this, $iter = TMP_22.$$p, block = $iter || nil;
 
-      TMP_6.$$p = null;
+      TMP_22.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_7 = function(){var self = TMP_7.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_23 = function(){var self = TMP_23.$$s || this;
 
-        return self.$size()}, TMP_7.$$s = self, TMP_7), $a).call($b, "collect")
+        return self.$size()}, TMP_23.$$s = self, TMP_23.$$arity = 0, TMP_23), $a).call($b, "collect")
       };
       
       var result = [];
 
       for (var i = 0, length = self.length; i < length; i++) {
         var value = Opal.yield1(block, self[i]);
-
-        if (value === $breaker) {
-          return $breaker.$v;
-        }
-
         result.push(value);
       }
 
       return result;
     
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$collect!', TMP_8 = function() {
-      var $a, $b, TMP_9, self = this, $iter = TMP_8.$$p, block = $iter || nil;
+    Opal.defn(self, '$collect!', TMP_24 = function() {
+      var $a, $b, TMP_25, self = this, $iter = TMP_24.$$p, block = $iter || nil;
 
-      TMP_8.$$p = null;
+      TMP_24.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_9 = function(){var self = TMP_9.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_25 = function(){var self = TMP_25.$$s || this;
 
-        return self.$size()}, TMP_9.$$s = self, TMP_9), $a).call($b, "collect!")
+        return self.$size()}, TMP_25.$$s = self, TMP_25.$$arity = 0, TMP_25), $a).call($b, "collect!")
       };
       
       for (var i = 0, length = self.length; i < length; i++) {
         var value = Opal.yield1(block, self[i]);
-
-        if (value === $breaker) {
-          return $breaker.$v;
-        }
-
         self[i] = value;
       }
     
       return self;
-    });
+    }, TMP_24.$$arity = 0);
 
     
     function binomial_coefficient(n, k) {
@@ -10712,29 +10950,29 @@ Opal.modules["corelib/array"] = function(Opal) {
     }
   
 
-    Opal.defn(self, '$combination', TMP_10 = function(n) {
-      var $a, $b, TMP_11, self = this, $iter = TMP_10.$$p, $yield = $iter || nil, num = nil;
+    Opal.defn(self, '$combination', TMP_26 = function ːcombination(n) {
+      var $a, $b, TMP_27, self = this, $iter = TMP_26.$$p, $yield = $iter || nil, num = nil;
 
-      TMP_10.$$p = null;
+      TMP_26.$$p = null;
       num = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
       if (($yield !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_11 = function(){var self = TMP_11.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_27 = function(){var self = TMP_27.$$s || this;
 
-        return binomial_coefficient(self.length, num);}, TMP_11.$$s = self, TMP_11), $a).call($b, "combination", num)
+        return binomial_coefficient(self.length, num);}, TMP_27.$$s = self, TMP_27.$$arity = 0, TMP_27), $a).call($b, "combination", num)
       };
       
       var i, length, stack, chosen, lev, done, next;
 
       if (num === 0) {
-        ((($a = Opal.yield1($yield, [])) === $breaker) ? $breaker.$v : $a)
+        Opal.yield1($yield, [])
       } else if (num === 1) {
         for (i = 0, length = self.length; i < length; i++) {
-          ((($a = Opal.yield1($yield, [self[i]])) === $breaker) ? $breaker.$v : $a)
+          Opal.yield1($yield, [self[i]])
         }
       }
       else if (num === self.length) {
-        ((($a = Opal.yield1($yield, self.slice())) === $breaker) ? $breaker.$v : $a)
+        Opal.yield1($yield, self.slice())
       }
       else if (num >= 0 && num < self.length) {
         stack = [];
@@ -10754,7 +10992,7 @@ Opal.modules["corelib/array"] = function(Opal) {
             next = stack[lev+1] = stack[lev] + 1;
             chosen[lev] = self[next];
           }
-          ((($a = Opal.yield1($yield, chosen.slice())) === $breaker) ? $breaker.$v : $a)
+          Opal.yield1($yield, chosen.slice())
           lev++;
           do {
             done = (lev === 0);
@@ -10765,9 +11003,41 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     ;
       return self;
-    });
+    }, TMP_26.$$arity = 1);
 
-    Opal.defn(self, '$compact', function() {
+    Opal.defn(self, '$repeated_combination', TMP_28 = function ːrepeated_combination(n) {
+      var $a, $b, TMP_29, self = this, $iter = TMP_28.$$p, $yield = $iter || nil, num = nil;
+
+      TMP_28.$$p = null;
+      num = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
+      if (($yield !== nil)) {
+        } else {
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_29 = function(){var self = TMP_29.$$s || this;
+
+        return binomial_coefficient(self.length + num - 1, num);}, TMP_29.$$s = self, TMP_29.$$arity = 0, TMP_29), $a).call($b, "repeated_combination", num)
+      };
+      
+      function iterate(max, from, buffer, self) {
+        if (buffer.length == max) {
+          var copy = buffer.slice();
+          Opal.yield1($yield, copy)
+          return;
+        }
+        for (var i = from; i < self.length; i++) {
+          buffer.push(self[i]);
+          iterate(max, i, buffer, self);
+          buffer.pop();
+        }
+      }
+
+      if (num >= 0) {
+        iterate(num, 0, [], self);
+      }
+    
+      return self;
+    }, TMP_28.$$arity = 1);
+
+    Opal.defn(self, '$compact', TMP_30 = function ːcompact() {
       var self = this;
 
       
@@ -10781,9 +11051,9 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_30.$$arity = 0);
 
-    Opal.defn(self, '$compact!', function() {
+    Opal.defn(self, '$compact!', TMP_31 = function() {
       var self = this;
 
       
@@ -10800,12 +11070,12 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self.length === original ? nil : self;
     
-    });
+    }, TMP_31.$$arity = 0);
 
-    Opal.defn(self, '$concat', function(other) {
+    Opal.defn(self, '$concat', TMP_32 = function ːconcat(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
@@ -10816,12 +11086,12 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_32.$$arity = 1);
 
-    Opal.defn(self, '$delete', TMP_12 = function(object) {
-      var $a, self = this, $iter = TMP_12.$$p, $yield = $iter || nil;
+    Opal.defn(self, '$delete', TMP_33 = function(object) {
+      var self = this, $iter = TMP_33.$$p, $yield = $iter || nil;
 
-      TMP_12.$$p = null;
+      TMP_33.$$p = null;
       
       var original = self.length;
 
@@ -10836,15 +11106,15 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       if (self.length === original) {
         if (($yield !== nil)) {
-          return ((($a = Opal.yieldX($yield, [])) === $breaker) ? $breaker.$v : $a);
+          return Opal.yieldX($yield, []);
         }
         return nil;
       }
       return object;
     ;
-    });
+    }, TMP_33.$$arity = 1);
 
-    Opal.defn(self, '$delete_at', function(index) {
+    Opal.defn(self, '$delete_at', TMP_34 = function ːdelete_at(index) {
       var self = this;
 
       
@@ -10864,23 +11134,21 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     ;
-    });
+    }, TMP_34.$$arity = 1);
 
-    Opal.defn(self, '$delete_if', TMP_13 = function() {
-      var $a, $b, TMP_14, self = this, $iter = TMP_13.$$p, block = $iter || nil;
+    Opal.defn(self, '$delete_if', TMP_35 = function ːdelete_if() {
+      var $a, $b, TMP_36, self = this, $iter = TMP_35.$$p, block = $iter || nil;
 
-      TMP_13.$$p = null;
+      TMP_35.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_14 = function(){var self = TMP_14.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_36 = function(){var self = TMP_36.$$s || this;
 
-        return self.$size()}, TMP_14.$$s = self, TMP_14), $a).call($b, "delete_if")
+        return self.$size()}, TMP_36.$$s = self, TMP_36.$$arity = 0, TMP_36), $a).call($b, "delete_if")
       };
       
       for (var i = 0, length = self.length, value; i < length; i++) {
-        if ((value = block(self[i])) === $breaker) {
-          return $breaker.$v;
-        }
+        value = block(self[i]);
 
         if (value !== false && value !== nil) {
           self.splice(i, 1);
@@ -10891,9 +11159,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_35.$$arity = 0);
 
-    Opal.defn(self, '$drop', function(number) {
+    Opal.defn(self, '$drop', TMP_37 = function ːdrop(number) {
       var self = this;
 
       
@@ -10903,59 +11171,71 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self.slice(number);
     ;
-    });
+    }, TMP_37.$$arity = 1);
 
-    Opal.defn(self, '$each', TMP_15 = function() {
-      var $a, $b, TMP_16, self = this, $iter = TMP_15.$$p, block = $iter || nil;
+    Opal.defn(self, '$dup', TMP_38 = function ːdup() {
+      var $a, $b, self = this, $iter = TMP_38.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_15.$$p = null;
+      TMP_38.$$p = null;
+      $zuper = [];
+      
+      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
+        $zuper[$zuper_index] = arguments[$zuper_index];
+      }
+      
+      if (
+        self.$$class === Opal.Array &&
+        self.$allocate.$$pristine &&
+        self.$copy_instance_variables.$$pristine &&
+        self.$initialize_dup.$$pristine
+      ) return self.slice(0);
+    
+      return ($a = ($b = self, Opal.find_super_dispatcher(self, 'dup', TMP_38, false)), $a.$$p = $iter, $a).apply($b, $zuper);
+    }, TMP_38.$$arity = 0);
+
+    Opal.defn(self, '$each', TMP_39 = function ːeach() {
+      var $a, $b, TMP_40, self = this, $iter = TMP_39.$$p, block = $iter || nil;
+
+      TMP_39.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_16 = function(){var self = TMP_16.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_40 = function(){var self = TMP_40.$$s || this;
 
-        return self.$size()}, TMP_16.$$s = self, TMP_16), $a).call($b, "each")
+        return self.$size()}, TMP_40.$$s = self, TMP_40.$$arity = 0, TMP_40), $a).call($b, "each")
       };
       
       for (var i = 0, length = self.length; i < length; i++) {
         var value = Opal.yield1(block, self[i]);
-
-        if (value == $breaker) {
-          return $breaker.$v;
-        }
       }
     
       return self;
-    });
+    }, TMP_39.$$arity = 0);
 
-    Opal.defn(self, '$each_index', TMP_17 = function() {
-      var $a, $b, TMP_18, self = this, $iter = TMP_17.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_index', TMP_41 = function ːeach_index() {
+      var $a, $b, TMP_42, self = this, $iter = TMP_41.$$p, block = $iter || nil;
 
-      TMP_17.$$p = null;
+      TMP_41.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_18 = function(){var self = TMP_18.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_42 = function(){var self = TMP_42.$$s || this;
 
-        return self.$size()}, TMP_18.$$s = self, TMP_18), $a).call($b, "each_index")
+        return self.$size()}, TMP_42.$$s = self, TMP_42.$$arity = 0, TMP_42), $a).call($b, "each_index")
       };
       
       for (var i = 0, length = self.length; i < length; i++) {
         var value = Opal.yield1(block, i);
-
-        if (value === $breaker) {
-          return $breaker.$v;
-        }
       }
     
       return self;
-    });
+    }, TMP_41.$$arity = 0);
 
-    Opal.defn(self, '$empty?', function() {
+    Opal.defn(self, '$empty?', TMP_43 = function() {
       var self = this;
 
       return self.length === 0;
-    });
+    }, TMP_43.$$arity = 0);
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_44 = function(other) {
       var self = this;
 
       
@@ -11000,12 +11280,12 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return _eql(self, other);
     
-    });
+    }, TMP_44.$$arity = 1);
 
-    Opal.defn(self, '$fetch', TMP_19 = function(index, defaults) {
-      var self = this, $iter = TMP_19.$$p, block = $iter || nil;
+    Opal.defn(self, '$fetch', TMP_45 = function ːfetch(index, defaults) {
+      var self = this, $iter = TMP_45.$$p, block = $iter || nil;
 
-      TMP_19.$$p = null;
+      TMP_45.$$p = null;
       
       var original = index;
 
@@ -11034,58 +11314,58 @@ Opal.modules["corelib/array"] = function(Opal) {
         self.$raise($scope.get('IndexError'), "index " + (original) + " outside of array bounds: -" + (self.length) + "..." + (self.length));
       }
     ;
-    });
+    }, TMP_45.$$arity = -2);
 
-    Opal.defn(self, '$fill', TMP_20 = function() {
-      var $a, $b, self = this, $iter = TMP_20.$$p, block = $iter || nil, one = nil, two = nil, obj = nil, left = nil, right = nil, $splat_index = nil;
+    Opal.defn(self, '$fill', TMP_46 = function ːfill($a_rest) {
+      var $b, $c, self = this, args, $iter = TMP_46.$$p, block = $iter || nil, one = nil, two = nil, obj = nil, left = nil, right = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_20.$$p = null;
+      TMP_46.$$p = null;
       
       var i, length, value;
     
-      if (block !== false && block !== nil) {
-        if ((($a = args.length > 2) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if (block !== false && block !== nil && block != null) {
+        if ((($b = args.length > 2) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (args.$length()) + " for 0..2)")};
-        $b = args, $a = Opal.to_ary($b), one = ($a[0] == null ? nil : $a[0]), two = ($a[1] == null ? nil : $a[1]), $b;
+        $c = args, $b = Opal.to_ary($c), one = ($b[0] == null ? nil : $b[0]), two = ($b[1] == null ? nil : $b[1]), $c;
         } else {
-        if ((($a = args.length == 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = args.length == 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           self.$raise($scope.get('ArgumentError'), "wrong number of arguments (0 for 1..3)")
-        } else if ((($a = args.length > 3) !== nil && (!$a.$$is_boolean || $a == true))) {
+        } else if ((($b = args.length > 3) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (args.$length()) + " for 1..3)")};
-        $b = args, $a = Opal.to_ary($b), obj = ($a[0] == null ? nil : $a[0]), one = ($a[1] == null ? nil : $a[1]), two = ($a[2] == null ? nil : $a[2]), $b;
+        $c = args, $b = Opal.to_ary($c), obj = ($b[0] == null ? nil : $b[0]), one = ($b[1] == null ? nil : $b[1]), two = ($b[2] == null ? nil : $b[2]), $c;
       };
-      if ((($a = $scope.get('Range')['$==='](one)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if (two !== false && two !== nil) {
+      if ((($b = $scope.get('Range')['$==='](one)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        if (two !== false && two !== nil && two != null) {
           self.$raise($scope.get('TypeError'), "length invalid with range")};
         left = $scope.get('Opal').$coerce_to(one.$begin(), $scope.get('Integer'), "to_int");
-        if ((($a = left < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = left < 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           left += self.length;};
-        if ((($a = left < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = left < 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           self.$raise($scope.get('RangeError'), "" + (one.$inspect()) + " out of range")};
         right = $scope.get('Opal').$coerce_to(one.$end(), $scope.get('Integer'), "to_int");
-        if ((($a = right < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = right < 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           right += self.length;};
-        if ((($a = one['$exclude_end?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = one['$exclude_end?']()) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           } else {
           right += 1;
         };
-        if ((($a = right <= left) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = right <= left) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           return self};
-      } else if (one !== false && one !== nil) {
+      } else if (one !== false && one !== nil && one != null) {
         left = $scope.get('Opal').$coerce_to(one, $scope.get('Integer'), "to_int");
-        if ((($a = left < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = left < 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           left += self.length;};
-        if ((($a = left < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = left < 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           left = 0};
-        if (two !== false && two !== nil) {
+        if (two !== false && two !== nil && two != null) {
           right = $scope.get('Opal').$coerce_to(two, $scope.get('Integer'), "to_int");
-          if ((($a = right == 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($b = right == 0) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
             return self};
           right += left;
           } else {
@@ -11095,23 +11375,18 @@ Opal.modules["corelib/array"] = function(Opal) {
         left = 0;
         right = self.length;
       };
-      if ((($a = left > self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = left > self.length) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         
         for (i = self.length; i < right; i++) {
           self[i] = nil;
         }
       ;};
-      if ((($a = right > self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($b = right > self.length) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         self.length = right};
-      if (block !== false && block !== nil) {
+      if (block !== false && block !== nil && block != null) {
         
         for (length = self.length; left < right; left++) {
           value = block(left);
-
-          if (value === $breaker) {
-            return $breaker.$v;
-          }
-
           self[left] = value;
         }
       ;
@@ -11123,9 +11398,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       ;
       };
       return self;
-    });
+    }, TMP_46.$$arity = -1);
 
-    Opal.defn(self, '$first', function(count) {
+    Opal.defn(self, '$first', TMP_47 = function ːfirst(count) {
       var self = this;
 
       
@@ -11141,9 +11416,9 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self.slice(0, count);
     
-    });
+    }, TMP_47.$$arity = -1);
 
-    Opal.defn(self, '$flatten', function(level) {
+    Opal.defn(self, '$flatten', TMP_48 = function ːflatten(level) {
       var self = this;
 
       
@@ -11179,7 +11454,7 @@ Opal.modules["corelib/array"] = function(Opal) {
 
           switch (level) {
           case undefined:
-            result.push.apply(result, _flatten(ary));
+            result = result.concat(_flatten(ary));
             break;
           case 0:
             result.push(ary);
@@ -11195,11 +11470,11 @@ Opal.modules["corelib/array"] = function(Opal) {
         level = $scope.get('Opal').$coerce_to(level, $scope.get('Integer'), "to_int");
       }
 
-      return _flatten(self, level);
+      return toArraySubclass(_flatten(self, level), self.$class());
     
-    });
+    }, TMP_48.$$arity = -1);
 
-    Opal.defn(self, '$flatten!', function(level) {
+    Opal.defn(self, '$flatten!', TMP_49 = function(level) {
       var self = this;
 
       
@@ -11220,9 +11495,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       self.$replace(flattened);
     ;
       return self;
-    });
+    }, TMP_49.$$arity = -1);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_50 = function ːhash() {
       var self = this;
 
       
@@ -11263,9 +11538,9 @@ Opal.modules["corelib/array"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_50.$$arity = 0);
 
-    Opal.defn(self, '$include?', function(member) {
+    Opal.defn(self, '$include?', TMP_51 = function(member) {
       var self = this;
 
       
@@ -11277,12 +11552,12 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return false;
     
-    });
+    }, TMP_51.$$arity = 1);
 
-    Opal.defn(self, '$index', TMP_21 = function(object) {
-      var self = this, $iter = TMP_21.$$p, block = $iter || nil;
+    Opal.defn(self, '$index', TMP_52 = function ːindex(object) {
+      var self = this, $iter = TMP_52.$$p, block = $iter || nil;
 
-      TMP_21.$$p = null;
+      TMP_52.$$p = null;
       
       var i, length, value;
 
@@ -11295,9 +11570,7 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
       else if (block !== nil) {
         for (i = 0, length = self.length; i < length; i++) {
-          if ((value = block(self[i])) === $breaker) {
-            return $breaker.$v;
-          }
+          value = block(self[i]);
 
           if (value !== false && value !== nil) {
             return i;
@@ -11310,16 +11583,16 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_52.$$arity = -1);
 
-    Opal.defn(self, '$insert', function(index) {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$insert', TMP_53 = function ːinsert(index, $a_rest) {
+      var self = this, objects;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      objects = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        objects[$arg_idx - 1] = arguments[$arg_idx];
       }
       
       index = $scope.get('Opal').$coerce_to(index, $scope.get('Integer'), "to_int");
@@ -11342,9 +11615,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     ;
       return self;
-    });
+    }, TMP_53.$$arity = -2);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_54 = function ːinspect() {
       var self = this;
 
       
@@ -11364,18 +11637,18 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return '[' + result.join(', ') + ']';
     ;
-    });
+    }, TMP_54.$$arity = 0);
 
-    Opal.defn(self, '$join', function(sep) {
+    Opal.defn(self, '$join', TMP_55 = function ːjoin(sep) {
       var $a, self = this;
       if ($gvars[","] == null) $gvars[","] = nil;
 
       if (sep == null) {
-        sep = nil
+        sep = nil;
       }
-      if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return ""};
-      if ((($a = sep === nil) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = sep === nil) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         sep = $gvars[","]};
       
       var result = [];
@@ -11428,23 +11701,21 @@ Opal.modules["corelib/array"] = function(Opal) {
         return result.join($scope.get('Opal')['$coerce_to!'](sep, $scope.get('String'), "to_str").$to_s());
       }
     ;
-    });
+    }, TMP_55.$$arity = -1);
 
-    Opal.defn(self, '$keep_if', TMP_22 = function() {
-      var $a, $b, TMP_23, self = this, $iter = TMP_22.$$p, block = $iter || nil;
+    Opal.defn(self, '$keep_if', TMP_56 = function ːkeep_if() {
+      var $a, $b, TMP_57, self = this, $iter = TMP_56.$$p, block = $iter || nil;
 
-      TMP_22.$$p = null;
+      TMP_56.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_23 = function(){var self = TMP_23.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_57 = function(){var self = TMP_57.$$s || this;
 
-        return self.$size()}, TMP_23.$$s = self, TMP_23), $a).call($b, "keep_if")
+        return self.$size()}, TMP_57.$$s = self, TMP_57.$$arity = 0, TMP_57), $a).call($b, "keep_if")
       };
       
       for (var i = 0, length = self.length, value; i < length; i++) {
-        if ((value = block(self[i])) === $breaker) {
-          return $breaker.$v;
-        }
+        value = block(self[i]);
 
         if (value === false || value === nil) {
           self.splice(i, 1);
@@ -11455,9 +11726,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_56.$$arity = 0);
 
-    Opal.defn(self, '$last', function(count) {
+    Opal.defn(self, '$last', TMP_58 = function ːlast(count) {
       var self = this;
 
       
@@ -11477,27 +11748,40 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self.slice(self.length - count, self.length);
     
-    });
+    }, TMP_58.$$arity = -1);
 
-    Opal.defn(self, '$length', function() {
+    Opal.defn(self, '$length', TMP_59 = function ːlength() {
       var self = this;
 
       return self.length;
-    });
+    }, TMP_59.$$arity = 0);
 
     Opal.alias(self, 'map', 'collect');
 
     Opal.alias(self, 'map!', 'collect!');
 
-    Opal.defn(self, '$permutation', TMP_24 = function(num) {
-      var $a, $b, TMP_25, self = this, $iter = TMP_24.$$p, block = $iter || nil, perm = nil, used = nil;
+    
+    // Returns the product of from, from-1, ..., from - how_many + 1.
+    function descending_factorial(from, how_many) {
+      var count = how_many >= 0 ? 1 : 0;
+      while (how_many) {
+        count *= from;
+        from--;
+        how_many--;
+      }
+      return count;
+    }
+  
 
-      TMP_24.$$p = null;
+    Opal.defn(self, '$permutation', TMP_60 = function ːpermutation(num) {
+      var $a, $b, TMP_61, self = this, $iter = TMP_60.$$p, block = $iter || nil, perm = nil, used = nil;
+
+      TMP_60.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_25 = function(){var self = TMP_25.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_61 = function(){var self = TMP_61.$$s || this;
 
-        return self.$size()}, TMP_25.$$s = self, TMP_25), $a).call($b, "permutation", num)
+        return descending_factorial(self.length, num === undefined ? self.length : num);}, TMP_61.$$s = self, TMP_61.$$arity = 0, TMP_61), $a).call($b, "permutation", num)
       };
       
       var permute, offensive, output;
@@ -11514,12 +11798,12 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
       else if (num === 0) {
         // exactly one permutation: the zero-length array
-        ((($a = Opal.yield1(block, [])) === $breaker) ? $breaker.$v : $a)
+        Opal.yield1(block, [])
       }
       else if (num === 1) {
         // this is a special, easy case
         for (var i = 0; i < self.length; i++) {
-          ((($a = Opal.yield1(block, [self[i]])) === $breaker) ? $breaker.$v : $a)
+          Opal.yield1(block, [self[i]])
         }
       }
       else {
@@ -11559,37 +11843,71 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     ;
       return self;
-    });
+    }, TMP_60.$$arity = -1);
 
-    Opal.defn(self, '$pop', function(count) {
+    Opal.defn(self, '$repeated_permutation', TMP_62 = function ːrepeated_permutation(n) {
+      var $a, $b, TMP_63, self = this, $iter = TMP_62.$$p, $yield = $iter || nil, num = nil;
+
+      TMP_62.$$p = null;
+      num = $scope.get('Opal')['$coerce_to!'](n, $scope.get('Integer'), "to_int");
+      if (($yield !== nil)) {
+        } else {
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_63 = function(){var self = TMP_63.$$s || this, $c;
+
+        if ((($c = $rb_ge(num, 0)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
+            return self.$size()['$**'](num)
+            } else {
+            return 0
+          }}, TMP_63.$$s = self, TMP_63.$$arity = 0, TMP_63), $a).call($b, "repeated_permutation", num)
+      };
+      
+      function iterate(max, buffer, self) {
+        if (buffer.length == max) {
+          var copy = buffer.slice();
+          Opal.yield1($yield, copy)
+          return;
+        }
+        for (var i = 0; i < self.length; i++) {
+          buffer.push(self[i]);
+          iterate(max, buffer, self);
+          buffer.pop();
+        }
+      }
+
+      iterate(num, [], self.slice());
+    
+      return self;
+    }, TMP_62.$$arity = 1);
+
+    Opal.defn(self, '$pop', TMP_64 = function ːpop(count) {
       var $a, self = this;
 
-      if ((($a = count === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return nil};
         return self.pop();};
       count = $scope.get('Opal').$coerce_to(count, $scope.get('Integer'), "to_int");
-      if ((($a = count < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "negative array size")};
-      if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return []};
-      if ((($a = count > self.length) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count > self.length) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.splice(0, self.length);
         } else {
         return self.splice(self.length - count, self.length);
       };
-    });
+    }, TMP_64.$$arity = -1);
 
-    Opal.defn(self, '$product', TMP_26 = function() {
-      var $a, self = this, $iter = TMP_26.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$product', TMP_65 = function ːproduct($a_rest) {
+      var self = this, args, $iter = TMP_65.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_26.$$p = null;
+      TMP_65.$$p = null;
       
       var result = (block !== nil) ? null : [],
           n = args.length + 1,
@@ -11624,7 +11942,7 @@ Opal.modules["corelib/array"] = function(Opal) {
         if (result) {
           result.push(subarray);
         } else {
-          ((($a = Opal.yield1(block, subarray)) === $breaker) ? $breaker.$v : $a)
+          Opal.yield1(block, subarray)
         }
         m = n - 1;
         counters[m]++;
@@ -11637,16 +11955,16 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result || self;
     ;
-    });
+    }, TMP_65.$$arity = -1);
 
-    Opal.defn(self, '$push', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$push', TMP_66 = function ːpush($a_rest) {
+      var self = this, objects;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      objects = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        objects[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = 0, length = objects.length; i < length; i++) {
@@ -11654,9 +11972,9 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_66.$$arity = -1);
 
-    Opal.defn(self, '$rassoc', function(object) {
+    Opal.defn(self, '$rassoc', TMP_67 = function ːrassoc(object) {
       var self = this;
 
       
@@ -11672,25 +11990,23 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_67.$$arity = 1);
 
-    Opal.defn(self, '$reject', TMP_27 = function() {
-      var $a, $b, TMP_28, self = this, $iter = TMP_27.$$p, block = $iter || nil;
+    Opal.defn(self, '$reject', TMP_68 = function ːreject() {
+      var $a, $b, TMP_69, self = this, $iter = TMP_68.$$p, block = $iter || nil;
 
-      TMP_27.$$p = null;
+      TMP_68.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_28 = function(){var self = TMP_28.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_69 = function(){var self = TMP_69.$$s || this;
 
-        return self.$size()}, TMP_28.$$s = self, TMP_28), $a).call($b, "reject")
+        return self.$size()}, TMP_69.$$s = self, TMP_69.$$arity = 0, TMP_69), $a).call($b, "reject")
       };
       
       var result = [];
 
       for (var i = 0, length = self.length, value; i < length; i++) {
-        if ((value = block(self[i])) === $breaker) {
-          return $breaker.$v;
-        }
+        value = block(self[i]);
 
         if (value === false || value === nil) {
           result.push(self[i]);
@@ -11698,17 +12014,17 @@ Opal.modules["corelib/array"] = function(Opal) {
       }
       return result;
     
-    });
+    }, TMP_68.$$arity = 0);
 
-    Opal.defn(self, '$reject!', TMP_29 = function() {
-      var $a, $b, TMP_30, $c, self = this, $iter = TMP_29.$$p, block = $iter || nil, original = nil;
+    Opal.defn(self, '$reject!', TMP_70 = function() {
+      var $a, $b, TMP_71, $c, self = this, $iter = TMP_70.$$p, block = $iter || nil, original = nil;
 
-      TMP_29.$$p = null;
+      TMP_70.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_30 = function(){var self = TMP_30.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_71 = function(){var self = TMP_71.$$s || this;
 
-        return self.$size()}, TMP_30.$$s = self, TMP_30), $a).call($b, "reject!")
+        return self.$size()}, TMP_71.$$s = self, TMP_71.$$arity = 0, TMP_71), $a).call($b, "reject!")
       };
       original = self.$length();
       ($a = ($c = self).$delete_if, $a.$$p = block.$to_proc(), $a).call($c);
@@ -11717,12 +12033,12 @@ Opal.modules["corelib/array"] = function(Opal) {
         } else {
         return self
       };
-    });
+    }, TMP_70.$$arity = 0);
 
-    Opal.defn(self, '$replace', function(other) {
+    Opal.defn(self, '$replace', TMP_72 = function ːreplace(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Array')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Array')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         other = other.$to_a()
         } else {
         other = $scope.get('Opal').$coerce_to(other, $scope.get('Array'), "to_ary").$to_a()
@@ -11732,38 +12048,38 @@ Opal.modules["corelib/array"] = function(Opal) {
       self.push.apply(self, other);
     
       return self;
-    });
+    }, TMP_72.$$arity = 1);
 
-    Opal.defn(self, '$reverse', function() {
+    Opal.defn(self, '$reverse', TMP_73 = function ːreverse() {
       var self = this;
 
       return self.slice(0).reverse();
-    });
+    }, TMP_73.$$arity = 0);
 
-    Opal.defn(self, '$reverse!', function() {
+    Opal.defn(self, '$reverse!', TMP_74 = function() {
       var self = this;
 
       return self.reverse();
-    });
+    }, TMP_74.$$arity = 0);
 
-    Opal.defn(self, '$reverse_each', TMP_31 = function() {
-      var $a, $b, TMP_32, $c, self = this, $iter = TMP_31.$$p, block = $iter || nil;
+    Opal.defn(self, '$reverse_each', TMP_75 = function ːreverse_each() {
+      var $a, $b, TMP_76, $c, self = this, $iter = TMP_75.$$p, block = $iter || nil;
 
-      TMP_31.$$p = null;
+      TMP_75.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_32 = function(){var self = TMP_32.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_76 = function(){var self = TMP_76.$$s || this;
 
-        return self.$size()}, TMP_32.$$s = self, TMP_32), $a).call($b, "reverse_each")
+        return self.$size()}, TMP_76.$$s = self, TMP_76.$$arity = 0, TMP_76), $a).call($b, "reverse_each")
       };
       ($a = ($c = self.$reverse()).$each, $a.$$p = block.$to_proc(), $a).call($c);
       return self;
-    });
+    }, TMP_75.$$arity = 0);
 
-    Opal.defn(self, '$rindex', TMP_33 = function(object) {
-      var self = this, $iter = TMP_33.$$p, block = $iter || nil;
+    Opal.defn(self, '$rindex', TMP_77 = function ːrindex(object) {
+      var self = this, $iter = TMP_77.$$p, block = $iter || nil;
 
-      TMP_33.$$p = null;
+      TMP_77.$$p = null;
       
       var i, value;
 
@@ -11782,9 +12098,9 @@ Opal.modules["corelib/array"] = function(Opal) {
           if (i >= self.length) {
             break;
           }
-          if ((value = block(self[i])) === $breaker) {
-            return $breaker.$v;
-          }
+
+          value = block(self[i]);
+
           if (value !== false && value !== nil) {
             return i;
           }
@@ -11796,13 +12112,13 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_77.$$arity = -1);
 
-    Opal.defn(self, '$rotate', function(n) {
+    Opal.defn(self, '$rotate', TMP_78 = function ːrotate(n) {
       var self = this;
 
       if (n == null) {
-        n = 1
+        n = 1;
       }
       n = $scope.get('Opal').$coerce_to(n, $scope.get('Integer'), "to_int");
       
@@ -11822,13 +12138,13 @@ Opal.modules["corelib/array"] = function(Opal) {
       lastPart = ary.slice(0, idx);
       return firstPart.concat(lastPart);
     
-    });
+    }, TMP_78.$$arity = -1);
 
-    Opal.defn(self, '$rotate!', function(cnt) {
+    Opal.defn(self, '$rotate!', TMP_79 = function(cnt) {
       var self = this, ary = nil;
 
       if (cnt == null) {
-        cnt = 1
+        cnt = 1;
       }
       
       if (self.length === 0 || self.length === 1) {
@@ -11838,42 +12154,42 @@ Opal.modules["corelib/array"] = function(Opal) {
       cnt = $scope.get('Opal').$coerce_to(cnt, $scope.get('Integer'), "to_int");
       ary = self.$rotate(cnt);
       return self.$replace(ary);
-    });
+    }, TMP_79.$$arity = -1);
 
     (function($base, $super) {
       function $SampleRandom(){};
       var self = $SampleRandom = $klass($base, $super, 'SampleRandom', $SampleRandom);
 
-      var def = self.$$proto, $scope = self.$$scope;
+      var def = self.$$proto, $scope = self.$$scope, TMP_80, TMP_81;
 
       def.rng = nil;
-      Opal.defn(self, '$initialize', function(rng) {
+      Opal.defn(self, '$initialize', TMP_80 = function ːinitialize(rng) {
         var self = this;
 
         return self.rng = rng;
-      });
+      }, TMP_80.$$arity = 1);
 
-      return (Opal.defn(self, '$rand', function(size) {
+      return (Opal.defn(self, '$rand', TMP_81 = function ːrand(size) {
         var $a, self = this, random = nil;
 
         random = $scope.get('Opal').$coerce_to(self.rng.$rand(size), $scope.get('Integer'), "to_int");
-        if ((($a = random < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = random < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('RangeError'), "random value must be >= 0")};
-        if ((($a = random < size) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = random < size) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           } else {
           self.$raise($scope.get('RangeError'), "random value must be less than Array size")
         };
         return random;
-      }), nil) && 'rand';
+      }, TMP_81.$$arity = 1), nil) && 'rand';
     })($scope.base, null);
 
-    Opal.defn(self, '$sample', function(count, options) {
+    Opal.defn(self, '$sample', TMP_82 = function ːsample(count, options) {
       var $a, $b, self = this, o = nil, rng = nil;
 
-      if ((($a = count === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$at($scope.get('Kernel').$rand(self.length))};
-      if ((($a = options === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = (o = $scope.get('Opal')['$coerce_to?'](count, $scope.get('Hash'), "to_hash"))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = options === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = (o = $scope.get('Opal')['$coerce_to?'](count, $scope.get('Hash'), "to_hash"))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           options = o;
           count = nil;
           } else {
@@ -11884,16 +12200,16 @@ Opal.modules["corelib/array"] = function(Opal) {
         count = $scope.get('Opal').$coerce_to(count, $scope.get('Integer'), "to_int");
         options = $scope.get('Opal').$coerce_to(options, $scope.get('Hash'), "to_hash");
       };
-      if ((($a = (($b = count !== false && count !== nil) ? count < 0 : count)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = count !== false && count !== nil && count != null) ? count < 0 : count)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "count must be greater than 0")};
-      if (options !== false && options !== nil) {
+      if (options !== false && options !== nil && options != null) {
         rng = options['$[]']("random")};
-      if ((($a = (($b = rng !== false && rng !== nil) ? rng['$respond_to?']("rand") : rng)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = rng !== false && rng !== nil && rng != null) ? rng['$respond_to?']("rand") : rng)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         rng = $scope.get('SampleRandom').$new(rng)
         } else {
         rng = $scope.get('Kernel')
       };
-      if (count !== false && count !== nil) {
+      if (count !== false && count !== nil && count != null) {
         } else {
         return self[rng.$rand(self.length)]
       };
@@ -11977,17 +12293,17 @@ Opal.modules["corelib/array"] = function(Opal) {
           return count === self.length ? result : (result)['$[]'](0, count);
       }
     
-    });
+    }, TMP_82.$$arity = -1);
 
-    Opal.defn(self, '$select', TMP_34 = function() {
-      var $a, $b, TMP_35, self = this, $iter = TMP_34.$$p, block = $iter || nil;
+    Opal.defn(self, '$select', TMP_83 = function ːselect() {
+      var $a, $b, TMP_84, self = this, $iter = TMP_83.$$p, block = $iter || nil;
 
-      TMP_34.$$p = null;
+      TMP_83.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_35 = function(){var self = TMP_35.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_84 = function(){var self = TMP_84.$$s || this;
 
-        return self.$size()}, TMP_35.$$s = self, TMP_35), $a).call($b, "select")
+        return self.$size()}, TMP_84.$$s = self, TMP_84.$$arity = 0, TMP_84), $a).call($b, "select")
       };
       
       var result = [];
@@ -11995,9 +12311,7 @@ Opal.modules["corelib/array"] = function(Opal) {
       for (var i = 0, length = self.length, item, value; i < length; i++) {
         item = self[i];
 
-        if ((value = Opal.yield1(block, item)) === $breaker) {
-          return $breaker.$v;
-        }
+        value = Opal.yield1(block, item);
 
         if (value !== false && value !== nil) {
           result.push(item);
@@ -12006,49 +12320,49 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_83.$$arity = 0);
 
-    Opal.defn(self, '$select!', TMP_36 = function() {
-      var $a, $b, TMP_37, $c, self = this, $iter = TMP_36.$$p, block = $iter || nil;
+    Opal.defn(self, '$select!', TMP_85 = function() {
+      var $a, $b, TMP_86, $c, self = this, $iter = TMP_85.$$p, block = $iter || nil;
 
-      TMP_36.$$p = null;
+      TMP_85.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_37 = function(){var self = TMP_37.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_86 = function(){var self = TMP_86.$$s || this;
 
-        return self.$size()}, TMP_37.$$s = self, TMP_37), $a).call($b, "select!")
+        return self.$size()}, TMP_86.$$s = self, TMP_86.$$arity = 0, TMP_86), $a).call($b, "select!")
       };
       
       var original = self.length;
       ($a = ($c = self).$keep_if, $a.$$p = block.$to_proc(), $a).call($c);
       return self.length === original ? nil : self;
     
-    });
+    }, TMP_85.$$arity = 0);
 
-    Opal.defn(self, '$shift', function(count) {
+    Opal.defn(self, '$shift', TMP_87 = function ːshift(count) {
       var $a, self = this;
 
-      if ((($a = count === undefined) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return nil};
         return self.shift();};
       count = $scope.get('Opal').$coerce_to(count, $scope.get('Integer'), "to_int");
-      if ((($a = count < 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = count < 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "negative array size")};
-      if ((($a = self.length === 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.length === 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return []};
       return self.splice(0, count);
-    });
+    }, TMP_87.$$arity = -1);
 
     Opal.alias(self, 'size', 'length');
 
-    Opal.defn(self, '$shuffle', function(rng) {
+    Opal.defn(self, '$shuffle', TMP_88 = function ːshuffle(rng) {
       var self = this;
 
-      return self.$dup()['$shuffle!'](rng);
-    });
+      return self.$dup().$to_a()['$shuffle!'](rng);
+    }, TMP_88.$$arity = -1);
 
-    Opal.defn(self, '$shuffle!', function(rng) {
+    Opal.defn(self, '$shuffle!', TMP_89 = function(rng) {
       var self = this;
 
       
@@ -12089,35 +12403,98 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self;
     ;
-    });
+    }, TMP_89.$$arity = -1);
 
     Opal.alias(self, 'slice', '[]');
 
-    Opal.defn(self, '$slice!', function(index, length) {
-      var self = this;
+    Opal.defn(self, '$slice!', TMP_90 = function(index, length) {
+      var $a, self = this, result = nil, range = nil, range_start = nil, range_end = nil, start = nil;
 
+      result = nil;
+      if ((($a = length === undefined) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $scope.get('Range')['$==='](index)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          range = index;
+          result = self['$[]'](range);
+          range_start = $scope.get('Opal').$coerce_to(range.$begin(), $scope.get('Integer'), "to_int");
+          range_end = $scope.get('Opal').$coerce_to(range.$end(), $scope.get('Integer'), "to_int");
+          
+          if (range_start < 0) {
+            range_start += self.length;
+          }
+
+          if (range_end < 0) {
+            range_end += self.length;
+          } else if (range_end >= self.length) {
+            range_end = self.length - 1;
+            if (range.exclude) {
+              range_end += 1;
+            }
+          }
+
+          var range_length = range_end - range_start;
+          if (range.exclude) {
+            range_end -= 1;
+          } else {
+            range_length += 1;
+          }
+
+          if (range_start < self.length && range_start >= 0 && range_end < self.length && range_end >= 0 && range_length > 0) {
+            self.splice(range_start, range_length);
+          }
+        
+          } else {
+          start = $scope.get('Opal').$coerce_to(index, $scope.get('Integer'), "to_int");
+          
+          if (start < 0) {
+            start += self.length;
+          }
+
+          if (start < 0 || start >= self.length) {
+            return nil;
+          }
+
+          result = self[start];
+
+          if (start === 0) {
+            self.shift();
+          } else {
+            self.splice(start, 1);
+          }
+        
+        }
+        } else {
+        start = $scope.get('Opal').$coerce_to(index, $scope.get('Integer'), "to_int");
+        length = $scope.get('Opal').$coerce_to(length, $scope.get('Integer'), "to_int");
+        
+        if (length < 0) {
+          return nil;
+        }
+
+        var end = start + length;
+
+        result = self['$[]'](start, length);
+
+        if (start < 0) {
+          start += self.length;
+        }
+
+        if (start + length > self.length) {
+          length = self.length - start;
+        }
+
+        if (start < self.length && start >= 0) {
+          self.splice(start, length);
+        }
       
-      if (index < 0) {
-        index += self.length;
-      }
+      };
+      return result;
+    }, TMP_90.$$arity = -2);
 
-      if (length != null) {
-        return self.splice(index, length);
-      }
+    Opal.defn(self, '$sort', TMP_91 = function ːsort() {
+      var $a, self = this, $iter = TMP_91.$$p, block = $iter || nil;
 
-      if (index < 0 || index >= self.length) {
-        return nil;
-      }
-
-      return self.splice(index, 1)[0];
-    
-    });
-
-    Opal.defn(self, '$sort', TMP_38 = function() {
-      var $a, self = this, $iter = TMP_38.$$p, block = $iter || nil;
-
-      TMP_38.$$p = null;
-      if ((($a = self.length > 1) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_91.$$p = null;
+      if ((($a = self.length > 1) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return self
       };
@@ -12128,35 +12505,22 @@ Opal.modules["corelib/array"] = function(Opal) {
         };
       }
 
-      try {
-        return self.slice().sort(function(x, y) {
-          var ret = block(x, y);
+      return self.slice().sort(function(x, y) {
+        var ret = block(x, y);
 
-          if (ret === $breaker) {
-            throw $breaker;
-          }
-          else if (ret === nil) {
-            self.$raise($scope.get('ArgumentError'), "comparison of " + ((x).$inspect()) + " with " + ((y).$inspect()) + " failed");
-          }
+        if (ret === nil) {
+          self.$raise($scope.get('ArgumentError'), "comparison of " + ((x).$inspect()) + " with " + ((y).$inspect()) + " failed");
+        }
 
-          return $rb_gt(ret, 0) ? 1 : ($rb_lt(ret, 0) ? -1 : 0);
-        });
-      }
-      catch (e) {
-        if (e === $breaker) {
-          return $breaker.$v;
-        }
-        else {
-          throw e;
-        }
-      }
+        return $rb_gt(ret, 0) ? 1 : ($rb_lt(ret, 0) ? -1 : 0);
+      });
     ;
-    });
+    }, TMP_91.$$arity = 0);
 
-    Opal.defn(self, '$sort!', TMP_39 = function() {
-      var $a, $b, self = this, $iter = TMP_39.$$p, block = $iter || nil;
+    Opal.defn(self, '$sort!', TMP_92 = function() {
+      var $a, $b, self = this, $iter = TMP_92.$$p, block = $iter || nil;
 
-      TMP_39.$$p = null;
+      TMP_92.$$p = null;
       
       var result;
 
@@ -12174,9 +12538,22 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self;
     ;
-    });
+    }, TMP_92.$$arity = 0);
 
-    Opal.defn(self, '$take', function(count) {
+    Opal.defn(self, '$sort_by!', TMP_93 = function() {
+      var $a, $b, TMP_94, $c, self = this, $iter = TMP_93.$$p, block = $iter || nil;
+
+      TMP_93.$$p = null;
+      if ((block !== nil)) {
+        } else {
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_94 = function(){var self = TMP_94.$$s || this;
+
+        return self.$size()}, TMP_94.$$s = self, TMP_94.$$arity = 0, TMP_94), $a).call($b, "sort_by!")
+      };
+      return self.$replace(($a = ($c = self).$sort_by, $a.$$p = block.$to_proc(), $a).call($c));
+    }, TMP_93.$$arity = 0);
+
+    Opal.defn(self, '$take', TMP_95 = function ːtake(count) {
       var self = this;
 
       
@@ -12186,21 +12563,19 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return self.slice(0, count);
     ;
-    });
+    }, TMP_95.$$arity = 1);
 
-    Opal.defn(self, '$take_while', TMP_40 = function() {
-      var self = this, $iter = TMP_40.$$p, block = $iter || nil;
+    Opal.defn(self, '$take_while', TMP_96 = function ːtake_while() {
+      var self = this, $iter = TMP_96.$$p, block = $iter || nil;
 
-      TMP_40.$$p = null;
+      TMP_96.$$p = null;
       
       var result = [];
 
       for (var i = 0, length = self.length, item, value; i < length; i++) {
         item = self[i];
 
-        if ((value = block(item)) === $breaker) {
-          return $breaker.$v;
-        }
+        value = block(item);
 
         if (value === false || value === nil) {
           return result;
@@ -12211,17 +12586,17 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_96.$$arity = 0);
 
-    Opal.defn(self, '$to_a', function() {
+    Opal.defn(self, '$to_a', TMP_97 = function ːto_a() {
       var self = this;
 
       return self;
-    });
+    }, TMP_97.$$arity = 0);
 
     Opal.alias(self, 'to_ary', 'to_a');
 
-    Opal.defn(self, '$to_h', function() {
+    Opal.defn(self, '$to_h', TMP_98 = function ːto_h() {
       var self = this;
 
       
@@ -12242,38 +12617,38 @@ Opal.modules["corelib/array"] = function(Opal) {
 
       return hash;
     ;
-    });
+    }, TMP_98.$$arity = 0);
 
     Opal.alias(self, 'to_s', 'inspect');
 
-    Opal.defn(self, '$transpose', function() {
-      var $a, $b, TMP_41, self = this, result = nil, max = nil;
+    Opal.defn(self, '$transpose', TMP_101 = function ːtranspose() {
+      var $a, $b, TMP_99, self = this, result = nil, max = nil;
 
-      if ((($a = self['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return []};
       result = [];
       max = nil;
-      ($a = ($b = self).$each, $a.$$p = (TMP_41 = function(row){var self = TMP_41.$$s || this, $a, $b, TMP_42;
+      ($a = ($b = self).$each, $a.$$p = (TMP_99 = function(row){var self = TMP_99.$$s || this, $c, $d, TMP_100;
 if (row == null) row = nil;
-      if ((($a = $scope.get('Array')['$==='](row)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($c = $scope.get('Array')['$==='](row)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
           row = row.$to_a()
           } else {
           row = $scope.get('Opal').$coerce_to(row, $scope.get('Array'), "to_ary").$to_a()
         };
-        ((($a = max) !== false && $a !== nil) ? $a : max = row.length);
-        if ((($a = (row.length)['$!='](max)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        ((($c = max) !== false && $c !== nil && $c != null) ? $c : max = row.length);
+        if ((($c = (row.length)['$!='](max)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
           self.$raise($scope.get('IndexError'), "element size differs (" + (row.length) + " should be " + (max))};
-        return ($a = ($b = (row.length)).$times, $a.$$p = (TMP_42 = function(i){var self = TMP_42.$$s || this, $a, $b, $c, entry = nil;
+        return ($c = ($d = (row.length)).$times, $c.$$p = (TMP_100 = function(i){var self = TMP_100.$$s || this, $e, $f, $g, entry = nil;
 if (i == null) i = nil;
-        entry = (($a = i, $b = result, ((($c = $b['$[]']($a)) !== false && $c !== nil) ? $c : $b['$[]=']($a, []))));
-          return entry['$<<'](row.$at(i));}, TMP_42.$$s = self, TMP_42), $a).call($b);}, TMP_41.$$s = self, TMP_41), $a).call($b);
+        entry = (($e = i, $f = result, ((($g = $f['$[]']($e)) !== false && $g !== nil && $g != null) ? $g : $f['$[]=']($e, []))));
+          return entry['$<<'](row.$at(i));}, TMP_100.$$s = self, TMP_100.$$arity = 1, TMP_100), $c).call($d);}, TMP_99.$$s = self, TMP_99.$$arity = 1, TMP_99), $a).call($b);
       return result;
-    });
+    }, TMP_101.$$arity = 0);
 
-    Opal.defn(self, '$uniq', TMP_43 = function() {
-      var self = this, $iter = TMP_43.$$p, block = $iter || nil;
+    Opal.defn(self, '$uniq', TMP_102 = function ːuniq() {
+      var self = this, $iter = TMP_102.$$p, block = $iter || nil;
 
-      TMP_43.$$p = null;
+      TMP_102.$$p = null;
       
       var hash = $hash2([], {}), i, length, item, key;
 
@@ -12295,14 +12670,14 @@ if (i == null) i = nil;
         }
       }
 
-      return hash.$values();
+      return toArraySubclass((hash).$values(), self.$class());
     ;
-    });
+    }, TMP_102.$$arity = 0);
 
-    Opal.defn(self, '$uniq!', TMP_44 = function() {
-      var self = this, $iter = TMP_44.$$p, block = $iter || nil;
+    Opal.defn(self, '$uniq!', TMP_103 = function() {
+      var self = this, $iter = TMP_103.$$p, block = $iter || nil;
 
-      TMP_44.$$p = null;
+      TMP_103.$$p = null;
       
       var original_length = self.length, hash = $hash2([], {}), i, length, item, key;
 
@@ -12322,16 +12697,16 @@ if (i == null) i = nil;
 
       return self.length === original_length ? nil : self;
     ;
-    });
+    }, TMP_103.$$arity = 0);
 
-    Opal.defn(self, '$unshift', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$unshift', TMP_104 = function ːunshift($a_rest) {
+      var self = this, objects;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      objects = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        objects[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       for (var i = objects.length - 1; i >= 0; i--) {
@@ -12339,21 +12714,21 @@ if (i == null) i = nil;
       }
     
       return self;
-    });
+    }, TMP_104.$$arity = -1);
 
-    Opal.defn(self, '$values_at', function() {
-      var $a, $b, TMP_45, self = this, out = nil, $splat_index = nil;
+    Opal.defn(self, '$values_at', TMP_107 = function ːvalues_at($a_rest) {
+      var $b, $c, TMP_105, self = this, args, out = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       out = [];
-      ($a = ($b = args).$each, $a.$$p = (TMP_45 = function(elem){var self = TMP_45.$$s || this, $a, $b, TMP_46, finish = nil, start = nil, i = nil;
+      ($b = ($c = args).$each, $b.$$p = (TMP_105 = function(elem){var self = TMP_105.$$s || this, $a, $d, TMP_106, finish = nil, start = nil, i = nil;
 if (elem == null) elem = nil;
-      if ((($a = elem['$kind_of?']($scope.get('Range'))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = elem['$kind_of?']($scope.get('Range'))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           finish = $scope.get('Opal').$coerce_to(elem.$last(), $scope.get('Integer'), "to_int");
           start = $scope.get('Opal').$coerce_to(elem.$first(), $scope.get('Integer'), "to_int");
           
@@ -12373,26 +12748,26 @@ if (elem == null) elem = nil;
             return nil;;
           }
         
-          return ($a = ($b = start).$upto, $a.$$p = (TMP_46 = function(i){var self = TMP_46.$$s || this;
+          return ($a = ($d = start).$upto, $a.$$p = (TMP_106 = function(i){var self = TMP_106.$$s || this;
 if (i == null) i = nil;
-          return out['$<<'](self.$at(i))}, TMP_46.$$s = self, TMP_46), $a).call($b, finish);
+          return out['$<<'](self.$at(i))}, TMP_106.$$s = self, TMP_106.$$arity = 1, TMP_106), $a).call($d, finish);
           } else {
           i = $scope.get('Opal').$coerce_to(elem, $scope.get('Integer'), "to_int");
           return out['$<<'](self.$at(i));
-        }}, TMP_45.$$s = self, TMP_45), $a).call($b);
+        }}, TMP_105.$$s = self, TMP_105.$$arity = 1, TMP_105), $b).call($c);
       return out;
-    });
+    }, TMP_107.$$arity = -1);
 
-    return (Opal.defn(self, '$zip', TMP_47 = function() {
-      var $a, self = this, $iter = TMP_47.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$zip', TMP_108 = function ːzip($a_rest) {
+      var $b, self = this, others, $iter = TMP_108.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var others = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        others[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      others = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        others[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_47.$$p = null;
+      TMP_108.$$p = null;
       
       var result = [], size = self.length, part, o, i, j, jj;
 
@@ -12409,7 +12784,7 @@ if (i == null) i = nil;
           }
           continue;
         }
-        others[j] = (((($a = $scope.get('Opal')['$coerce_to?'](o, $scope.get('Array'), "to_ary")) !== false && $a !== nil) ? $a : $scope.get('Opal')['$coerce_to!'](o, $scope.get('Enumerator'), "each"))).$to_a();
+        others[j] = (((($b = $scope.get('Opal')['$coerce_to?'](o, $scope.get('Array'), "to_ary")) !== false && $b !== nil && $b != null) ? $b : $scope.get('Opal')['$coerce_to!'](o, $scope.get('Enumerator'), "each"))).$to_a();
       }
 
       for (i = 0; i < size; i++) {
@@ -12438,13 +12813,37 @@ if (i == null) i = nil;
 
       return result;
     
-    }), nil) && 'zip';
+    }, TMP_108.$$arity = -1);
+
+    Opal.defs(self, '$inherited', TMP_109 = function ːinherited(klass) {
+      var self = this;
+
+      
+      klass.$$proto.$to_a = function() {
+        return this.slice(0, this.length);
+      }
+    
+    }, TMP_109.$$arity = 1);
+
+    Opal.defn(self, '$instance_variables', TMP_111 = function ːinstance_variables() {
+      var $a, $b, TMP_110, $c, $d, self = this, $iter = TMP_111.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
+
+      TMP_111.$$p = null;
+      $zuper = [];
+      
+      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
+        $zuper[$zuper_index] = arguments[$zuper_index];
+      }
+      return ($a = ($b = ($c = ($d = self, Opal.find_super_dispatcher(self, 'instance_variables', TMP_111, false)), $c.$$p = $iter, $c).apply($d, $zuper)).$reject, $a.$$p = (TMP_110 = function(ivar){var self = TMP_110.$$s || this, $c;
+if (ivar == null) ivar = nil;
+      return ((($c = /^@\d+$/.test(ivar)) !== false && $c !== nil && $c != null) ? $c : ivar['$==']("@length"))}, TMP_110.$$s = self, TMP_110.$$arity = 1, TMP_110), $a).call($b);
+    }, TMP_111.$$arity = 0);
+
+    return $scope.get('Opal').$pristine(self, "allocate", "copy_instance_variables", "initialize_dup");
   })($scope.base, Array);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/hash"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$require', '$include', '$coerce_to?', '$[]', '$merge!', '$allocate', '$raise', '$==', '$coerce_to!', '$lambda?', '$abs', '$arity', '$call', '$enum_for', '$size', '$inspect', '$flatten', '$eql?', '$default', '$to_proc', '$dup', '$===', '$default_proc', '$default_proc=', '$default=', '$alias_method']);
@@ -12453,21 +12852,20 @@ Opal.modules["corelib/hash"] = function(Opal) {
     function $Hash(){};
     var self = $Hash = $klass($base, $super, 'Hash', $Hash);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_5, TMP_7, TMP_9, TMP_11, TMP_12, TMP_14, TMP_15, TMP_16, TMP_18, TMP_20, TMP_22;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_18, TMP_20, TMP_22, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_36, TMP_37, TMP_38, TMP_39, TMP_40, TMP_41, TMP_42, TMP_44, TMP_46, TMP_47, TMP_49, TMP_51, TMP_52, TMP_53, TMP_54, TMP_55;
 
-    def.proc = def.none = nil;
     self.$include($scope.get('Enumerable'));
 
     def.$$is_hash = true;
 
-    Opal.defs(self, '$[]', function() {
-      var self = this, $splat_index = nil;
+    Opal.defs(self, '$[]', TMP_1 = function($a_rest) {
+      var self = this, argv;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var argv = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        argv[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      argv = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        argv[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var hash, argc = argv.length, i;
@@ -12515,9 +12913,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     ;
-    });
+    }, TMP_1.$$arity = -1);
 
-    Opal.defs(self, '$allocate', function() {
+    Opal.defs(self, '$allocate', TMP_2 = function ːallocate() {
       var self = this;
 
       
@@ -12525,34 +12923,34 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       Opal.hash_init(hash);
 
-      hash.none = nil;
-      hash.proc = nil;
+      hash.$$none = nil;
+      hash.$$proc = nil;
 
       return hash;
     
-    });
+    }, TMP_2.$$arity = 0);
 
-    Opal.defs(self, '$try_convert', function(obj) {
+    Opal.defs(self, '$try_convert', TMP_3 = function ːtry_convert(obj) {
       var self = this;
 
       return $scope.get('Opal')['$coerce_to?'](obj, $scope.get('Hash'), "to_hash");
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$initialize', TMP_1 = function(defaults) {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil;
+    Opal.defn(self, '$initialize', TMP_4 = function ːinitialize(defaults) {
+      var self = this, $iter = TMP_4.$$p, block = $iter || nil;
 
-      TMP_1.$$p = null;
+      TMP_4.$$p = null;
       
       if (defaults !== undefined && block !== nil) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (1 for 0)")
       }
-      self.none = (defaults === undefined ? nil : defaults);
-      self.proc = block;
+      self.$$none = (defaults === undefined ? nil : defaults);
+      self.$$proc = block;
     ;
       return self;
-    });
+    }, TMP_4.$$arity = -1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_5 = function(other) {
       var self = this;
 
       
@@ -12586,9 +12984,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return true;
     
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$[]', function(key) {
+    Opal.defn(self, '$[]', TMP_6 = function(key) {
       var self = this;
 
       
@@ -12600,18 +12998,18 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return self.$default(key);
     
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$[]=', function(key, value) {
+    Opal.defn(self, '$[]=', TMP_7 = function(key, value) {
       var self = this;
 
       
       Opal.hash_put(self, key, value);
       return value;
     
-    });
+    }, TMP_7.$$arity = 2);
 
-    Opal.defn(self, '$assoc', function(object) {
+    Opal.defn(self, '$assoc', TMP_8 = function ːassoc(object) {
       var self = this;
 
       
@@ -12631,18 +13029,18 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$clear', function() {
+    Opal.defn(self, '$clear', TMP_9 = function ːclear() {
       var self = this;
 
       
       Opal.hash_init(self);
       return self;
     
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$clone', function() {
+    Opal.defn(self, '$clone', TMP_10 = function ːclone() {
       var self = this;
 
       
@@ -12653,37 +13051,45 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     
-    });
+    }, TMP_10.$$arity = 0);
 
-    Opal.defn(self, '$default', function(key) {
+    Opal.defn(self, '$default', TMP_11 = function(key) {
       var self = this;
 
       
-      if (key !== undefined && self.proc !== nil) {
-        return self.proc.$call(self, key);
+      if (key !== undefined && self.$$proc !== nil && self.$$proc !== undefined) {
+        return self.$$proc.$call(self, key);
       }
-      return self.none;
-    ;
-    });
+      if (self.$$none === undefined) {
+        return nil;
+      }
+      return self.$$none;
+    
+    }, TMP_11.$$arity = -1);
 
-    Opal.defn(self, '$default=', function(object) {
+    Opal.defn(self, '$default=', TMP_12 = function(object) {
       var self = this;
 
       
-      self.proc = nil;
-      self.none = object;
+      self.$$proc = nil;
+      self.$$none = object;
 
       return object;
     
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$default_proc', function() {
+    Opal.defn(self, '$default_proc', TMP_13 = function ːdefault_proc() {
       var self = this;
 
-      return self.proc;
-    });
+      
+      if (self.$$proc !== undefined) {
+        return self.$$proc;
+      }
+      return nil;
+    
+    }, TMP_13.$$arity = 0);
 
-    Opal.defn(self, '$default_proc=', function(proc) {
+    Opal.defn(self, '$default_proc=', TMP_14 = function(proc) {
       var self = this;
 
       
@@ -12695,17 +13101,17 @@ Opal.modules["corelib/hash"] = function(Opal) {
         }
       }
 
-      self.none = nil;
-      self.proc = proc;
+      self.$$none = nil;
+      self.$$proc = proc;
 
       return proc;
     ;
-    });
+    }, TMP_14.$$arity = 1);
 
-    Opal.defn(self, '$delete', TMP_2 = function(key) {
-      var self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$delete', TMP_15 = function(key) {
+      var self = this, $iter = TMP_15.$$p, block = $iter || nil;
 
-      TMP_2.$$p = null;
+      TMP_15.$$p = null;
       
       var value = Opal.hash_delete(self, key);
 
@@ -12719,17 +13125,17 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$delete_if', TMP_3 = function() {
-      var $a, $b, TMP_4, self = this, $iter = TMP_3.$$p, block = $iter || nil;
+    Opal.defn(self, '$delete_if', TMP_16 = function ːdelete_if() {
+      var $a, $b, TMP_17, self = this, $iter = TMP_16.$$p, block = $iter || nil;
 
-      TMP_3.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_16.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_4 = function(){var self = TMP_4.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_17 = function(){var self = TMP_17.$$s || this;
 
-        return self.$size()}, TMP_4.$$s = self, TMP_4), $a).call($b, "delete_if")
+        return self.$size()}, TMP_17.$$s = self, TMP_17.$$arity = 0, TMP_17), $a).call($b, "delete_if")
       };
       
       for (var i = 0, keys = self.$$keys, length = keys.length, key, value, obj; i < length; i++) {
@@ -12744,10 +13150,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj !== false && obj !== nil) {
           if (Opal.hash_delete(self, key) !== undefined) {
             length--;
@@ -12758,22 +13160,22 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return self;
     
-    });
+    }, TMP_16.$$arity = 0);
 
     Opal.alias(self, 'dup', 'clone');
 
-    Opal.defn(self, '$each', TMP_5 = function() {
-      var $a, $b, TMP_6, self = this, $iter = TMP_5.$$p, block = $iter || nil;
+    Opal.defn(self, '$each', TMP_18 = function ːeach() {
+      var $a, $b, TMP_19, self = this, $iter = TMP_18.$$p, block = $iter || nil;
 
-      TMP_5.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_18.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_6 = function(){var self = TMP_6.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_19 = function(){var self = TMP_19.$$s || this;
 
-        return self.$size()}, TMP_6.$$s = self, TMP_6), $a).call($b, "each")
+        return self.$size()}, TMP_19.$$s = self, TMP_19.$$arity = 0, TMP_19), $a).call($b, "each")
       };
       
-      for (var i = 0, keys = self.$$keys, length = keys.length, key, value, obj; i < length; i++) {
+      for (var i = 0, keys = self.$$keys, length = keys.length, key, value; i < length; i++) {
         key = keys[i];
 
         if (key.$$is_string) {
@@ -12783,77 +13185,69 @@ Opal.modules["corelib/hash"] = function(Opal) {
           key = key.key;
         }
 
-        obj = Opal.yield1(block, [key, value]);
-
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
+        Opal.yield1(block, [key, value]);
       }
 
       return self;
     
-    });
+    }, TMP_18.$$arity = 0);
 
-    Opal.defn(self, '$each_key', TMP_7 = function() {
-      var $a, $b, TMP_8, self = this, $iter = TMP_7.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_key', TMP_20 = function ːeach_key() {
+      var $a, $b, TMP_21, self = this, $iter = TMP_20.$$p, block = $iter || nil;
 
-      TMP_7.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_20.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_8 = function(){var self = TMP_8.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_21 = function(){var self = TMP_21.$$s || this;
 
-        return self.$size()}, TMP_8.$$s = self, TMP_8), $a).call($b, "each_key")
+        return self.$size()}, TMP_21.$$s = self, TMP_21.$$arity = 0, TMP_21), $a).call($b, "each_key")
       };
       
       for (var i = 0, keys = self.$$keys, length = keys.length, key; i < length; i++) {
         key = keys[i];
 
-        if (block(key.$$is_string ? key : key.key) === $breaker) {
-          return $breaker.$v;
-        }
+        block(key.$$is_string ? key : key.key);
       }
 
       return self;
     
-    });
+    }, TMP_20.$$arity = 0);
 
     Opal.alias(self, 'each_pair', 'each');
 
-    Opal.defn(self, '$each_value', TMP_9 = function() {
-      var $a, $b, TMP_10, self = this, $iter = TMP_9.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_value', TMP_22 = function ːeach_value() {
+      var $a, $b, TMP_23, self = this, $iter = TMP_22.$$p, block = $iter || nil;
 
-      TMP_9.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_22.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_10 = function(){var self = TMP_10.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_23 = function(){var self = TMP_23.$$s || this;
 
-        return self.$size()}, TMP_10.$$s = self, TMP_10), $a).call($b, "each_value")
+        return self.$size()}, TMP_23.$$s = self, TMP_23.$$arity = 0, TMP_23), $a).call($b, "each_value")
       };
       
       for (var i = 0, keys = self.$$keys, length = keys.length, key; i < length; i++) {
         key = keys[i];
 
-        if (block(key.$$is_string ? self.$$smap[key] : key.value) === $breaker) {
-          return $breaker.$v;
-        }
+        block(key.$$is_string ? self.$$smap[key] : key.value);
       }
 
       return self;
     
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$empty?', function() {
+    Opal.defn(self, '$empty?', TMP_24 = function() {
       var self = this;
 
       return self.$$keys.length === 0;
-    });
+    }, TMP_24.$$arity = 0);
 
     Opal.alias(self, 'eql?', '==');
 
-    Opal.defn(self, '$fetch', TMP_11 = function(key, defaults) {
-      var self = this, $iter = TMP_11.$$p, block = $iter || nil;
+    Opal.defn(self, '$fetch', TMP_25 = function ːfetch(key, defaults) {
+      var self = this, $iter = TMP_25.$$p, block = $iter || nil;
 
-      TMP_11.$$p = null;
+      TMP_25.$$p = null;
       
       var value = Opal.hash_get(self, key);
 
@@ -12862,13 +13256,7 @@ Opal.modules["corelib/hash"] = function(Opal) {
       }
 
       if (block !== nil) {
-        value = block(key);
-
-        if (value === $breaker) {
-          return $breaker.$v;
-        }
-
-        return value;
+        return block(key);
       }
 
       if (defaults !== undefined) {
@@ -12876,13 +13264,13 @@ Opal.modules["corelib/hash"] = function(Opal) {
       }
     
       return self.$raise($scope.get('KeyError'), "key not found: " + (key.$inspect()));
-    });
+    }, TMP_25.$$arity = -2);
 
-    Opal.defn(self, '$flatten', function(level) {
+    Opal.defn(self, '$flatten', TMP_26 = function ːflatten(level) {
       var self = this;
 
       if (level == null) {
-        level = 1
+        level = 1;
       }
       level = $scope.get('Opal')['$coerce_to!'](level, $scope.get('Integer'), "to_int");
       
@@ -12915,15 +13303,15 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_26.$$arity = -1);
 
-    Opal.defn(self, '$has_key?', function(key) {
+    Opal.defn(self, '$has_key?', TMP_27 = function(key) {
       var self = this;
 
       return Opal.hash_get(self, key) !== undefined;
-    });
+    }, TMP_27.$$arity = 1);
 
-    Opal.defn(self, '$has_value?', function(value) {
+    Opal.defn(self, '$has_value?', TMP_28 = function(value) {
       var self = this;
 
       
@@ -12937,9 +13325,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return false;
     
-    });
+    }, TMP_28.$$arity = 1);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_29 = function ːhash() {
       var self = this;
 
       
@@ -12986,11 +13374,11 @@ Opal.modules["corelib/hash"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_29.$$arity = 0);
 
     Opal.alias(self, 'include?', 'has_key?');
 
-    Opal.defn(self, '$index', function(object) {
+    Opal.defn(self, '$index', TMP_30 = function ːindex(object) {
       var self = this;
 
       
@@ -13011,16 +13399,16 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_30.$$arity = 1);
 
-    Opal.defn(self, '$indexes', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$indexes', TMP_31 = function ːindexes($a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       var result = [];
@@ -13039,13 +13427,13 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_31.$$arity = -1);
 
     Opal.alias(self, 'indices', 'indexes');
 
     var inspect_ids;
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_32 = function ːinspect() {
       var self = this;
 
       
@@ -13085,9 +13473,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
         }
       }
     
-    });
+    }, TMP_32.$$arity = 0);
 
-    Opal.defn(self, '$invert', function() {
+    Opal.defn(self, '$invert', TMP_33 = function ːinvert() {
       var self = this;
 
       
@@ -13108,17 +13496,17 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     
-    });
+    }, TMP_33.$$arity = 0);
 
-    Opal.defn(self, '$keep_if', TMP_12 = function() {
-      var $a, $b, TMP_13, self = this, $iter = TMP_12.$$p, block = $iter || nil;
+    Opal.defn(self, '$keep_if', TMP_34 = function ːkeep_if() {
+      var $a, $b, TMP_35, self = this, $iter = TMP_34.$$p, block = $iter || nil;
 
-      TMP_12.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_34.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_13 = function(){var self = TMP_13.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_35 = function(){var self = TMP_35.$$s || this;
 
-        return self.$size()}, TMP_13.$$s = self, TMP_13), $a).call($b, "keep_if")
+        return self.$size()}, TMP_35.$$s = self, TMP_35.$$arity = 0, TMP_35), $a).call($b, "keep_if")
       };
       
       for (var i = 0, keys = self.$$keys, length = keys.length, key, value, obj; i < length; i++) {
@@ -13133,10 +13521,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj === false || obj === nil) {
           if (Opal.hash_delete(self, key) !== undefined) {
             length--;
@@ -13147,13 +13531,13 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return self;
     
-    });
+    }, TMP_34.$$arity = 0);
 
     Opal.alias(self, 'key', 'index');
 
     Opal.alias(self, 'key?', 'has_key?');
 
-    Opal.defn(self, '$keys', function() {
+    Opal.defn(self, '$keys', TMP_36 = function ːkeys() {
       var self = this;
 
       
@@ -13171,27 +13555,27 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_36.$$arity = 0);
 
-    Opal.defn(self, '$length', function() {
+    Opal.defn(self, '$length', TMP_37 = function ːlength() {
       var self = this;
 
       return self.$$keys.length;
-    });
+    }, TMP_37.$$arity = 0);
 
     Opal.alias(self, 'member?', 'has_key?');
 
-    Opal.defn(self, '$merge', TMP_14 = function(other) {
-      var $a, $b, self = this, $iter = TMP_14.$$p, block = $iter || nil;
+    Opal.defn(self, '$merge', TMP_38 = function ːmerge(other) {
+      var $a, $b, self = this, $iter = TMP_38.$$p, block = $iter || nil;
 
-      TMP_14.$$p = null;
+      TMP_38.$$p = null;
       return ($a = ($b = self.$dup())['$merge!'], $a.$$p = block.$to_proc(), $a).call($b, other);
-    });
+    }, TMP_38.$$arity = 1);
 
-    Opal.defn(self, '$merge!', TMP_15 = function(other) {
-      var self = this, $iter = TMP_15.$$p, block = $iter || nil;
+    Opal.defn(self, '$merge!', TMP_39 = function(other) {
+      var self = this, $iter = TMP_39.$$p, block = $iter || nil;
 
-      TMP_15.$$p = null;
+      TMP_39.$$p = null;
       
       if (!$scope.get('Hash')['$==='](other)) {
         other = $scope.get('Opal')['$coerce_to!'](other, $scope.get('Hash'), "to_hash");
@@ -13238,9 +13622,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return self;
     ;
-    });
+    }, TMP_39.$$arity = 1);
 
-    Opal.defn(self, '$rassoc', function(object) {
+    Opal.defn(self, '$rassoc', TMP_40 = function ːrassoc(object) {
       var self = this;
 
       
@@ -13261,26 +13645,26 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_40.$$arity = 1);
 
-    Opal.defn(self, '$rehash', function() {
+    Opal.defn(self, '$rehash', TMP_41 = function ːrehash() {
       var self = this;
 
       
       Opal.hash_rehash(self);
       return self;
     
-    });
+    }, TMP_41.$$arity = 0);
 
-    Opal.defn(self, '$reject', TMP_16 = function() {
-      var $a, $b, TMP_17, self = this, $iter = TMP_16.$$p, block = $iter || nil;
+    Opal.defn(self, '$reject', TMP_42 = function ːreject() {
+      var $a, $b, TMP_43, self = this, $iter = TMP_42.$$p, block = $iter || nil;
 
-      TMP_16.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_42.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_17 = function(){var self = TMP_17.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_43 = function(){var self = TMP_43.$$s || this;
 
-        return self.$size()}, TMP_17.$$s = self, TMP_17), $a).call($b, "reject")
+        return self.$size()}, TMP_43.$$s = self, TMP_43.$$arity = 0, TMP_43), $a).call($b, "reject")
       };
       
       var hash = Opal.hash();
@@ -13297,10 +13681,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj === false || obj === nil) {
           Opal.hash_put(hash, key, value);
         }
@@ -13308,17 +13688,17 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     
-    });
+    }, TMP_42.$$arity = 0);
 
-    Opal.defn(self, '$reject!', TMP_18 = function() {
-      var $a, $b, TMP_19, self = this, $iter = TMP_18.$$p, block = $iter || nil;
+    Opal.defn(self, '$reject!', TMP_44 = function() {
+      var $a, $b, TMP_45, self = this, $iter = TMP_44.$$p, block = $iter || nil;
 
-      TMP_18.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_44.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_19 = function(){var self = TMP_19.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_45 = function(){var self = TMP_45.$$s || this;
 
-        return self.$size()}, TMP_19.$$s = self, TMP_19), $a).call($b, "reject!")
+        return self.$size()}, TMP_45.$$s = self, TMP_45.$$arity = 0, TMP_45), $a).call($b, "reject!")
       };
       
       var changes_were_made = false;
@@ -13335,10 +13715,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj !== false && obj !== nil) {
           if (Opal.hash_delete(self, key) !== undefined) {
             changes_were_made = true;
@@ -13350,9 +13726,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return changes_were_made ? self : nil;
     
-    });
+    }, TMP_44.$$arity = 0);
 
-    Opal.defn(self, '$replace', function(other) {
+    Opal.defn(self, '$replace', TMP_46 = function ːreplace(other) {
       var $a, $b, self = this;
 
       other = $scope.get('Opal')['$coerce_to!'](other, $scope.get('Hash'), "to_hash");
@@ -13372,23 +13748,23 @@ Opal.modules["corelib/hash"] = function(Opal) {
         Opal.hash_put(self, key, other_value);
       }
     
-      if ((($a = other.$default_proc()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other.$default_proc()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         (($a = [other.$default_proc()]), $b = self, $b['$default_proc='].apply($b, $a), $a[$a.length-1])
         } else {
         (($a = [other.$default()]), $b = self, $b['$default='].apply($b, $a), $a[$a.length-1])
       };
       return self;
-    });
+    }, TMP_46.$$arity = 1);
 
-    Opal.defn(self, '$select', TMP_20 = function() {
-      var $a, $b, TMP_21, self = this, $iter = TMP_20.$$p, block = $iter || nil;
+    Opal.defn(self, '$select', TMP_47 = function ːselect() {
+      var $a, $b, TMP_48, self = this, $iter = TMP_47.$$p, block = $iter || nil;
 
-      TMP_20.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_47.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_21 = function(){var self = TMP_21.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_48 = function(){var self = TMP_48.$$s || this;
 
-        return self.$size()}, TMP_21.$$s = self, TMP_21), $a).call($b, "select")
+        return self.$size()}, TMP_48.$$s = self, TMP_48.$$arity = 0, TMP_48), $a).call($b, "select")
       };
       
       var hash = Opal.hash();
@@ -13405,10 +13781,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj !== false && obj !== nil) {
           Opal.hash_put(hash, key, value);
         }
@@ -13416,17 +13788,17 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     
-    });
+    }, TMP_47.$$arity = 0);
 
-    Opal.defn(self, '$select!', TMP_22 = function() {
-      var $a, $b, TMP_23, self = this, $iter = TMP_22.$$p, block = $iter || nil;
+    Opal.defn(self, '$select!', TMP_49 = function() {
+      var $a, $b, TMP_50, self = this, $iter = TMP_49.$$p, block = $iter || nil;
 
-      TMP_22.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_49.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_23 = function(){var self = TMP_23.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_50 = function(){var self = TMP_50.$$s || this;
 
-        return self.$size()}, TMP_23.$$s = self, TMP_23), $a).call($b, "select!")
+        return self.$size()}, TMP_50.$$s = self, TMP_50.$$arity = 0, TMP_50), $a).call($b, "select!")
       };
       
       var result = nil;
@@ -13443,10 +13815,6 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
         obj = block(key, value);
 
-        if (obj === $breaker) {
-          return $breaker.$v;
-        }
-
         if (obj === false || obj === nil) {
           if (Opal.hash_delete(self, key) !== undefined) {
             length--;
@@ -13458,9 +13826,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_49.$$arity = 0);
 
-    Opal.defn(self, '$shift', function() {
+    Opal.defn(self, '$shift', TMP_51 = function ːshift() {
       var self = this;
 
       
@@ -13477,13 +13845,13 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return self.$default(nil);
     
-    });
+    }, TMP_51.$$arity = 0);
 
     Opal.alias(self, 'size', 'length');
 
     self.$alias_method("store", "[]=");
 
-    Opal.defn(self, '$to_a', function() {
+    Opal.defn(self, '$to_a', TMP_52 = function ːto_a() {
       var self = this;
 
       
@@ -13504,9 +13872,9 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_52.$$arity = 0);
 
-    Opal.defn(self, '$to_h', function() {
+    Opal.defn(self, '$to_h', TMP_53 = function ːto_h() {
       var self = this;
 
       
@@ -13521,13 +13889,13 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return hash;
     
-    });
+    }, TMP_53.$$arity = 0);
 
-    Opal.defn(self, '$to_hash', function() {
+    Opal.defn(self, '$to_hash', TMP_54 = function ːto_hash() {
       var self = this;
 
       return self;
-    });
+    }, TMP_54.$$arity = 0);
 
     Opal.alias(self, 'to_s', 'inspect');
 
@@ -13537,7 +13905,7 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
     Opal.alias(self, 'values_at', 'indexes');
 
-    return (Opal.defn(self, '$values', function() {
+    return (Opal.defn(self, '$values', TMP_55 = function ːvalues() {
       var self = this;
 
       
@@ -13555,13 +13923,11 @@ Opal.modules["corelib/hash"] = function(Opal) {
 
       return result;
     
-    }), nil) && 'values';
+    }, TMP_55.$$arity = 0), nil) && 'values';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/number"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -13594,13 +13960,13 @@ Opal.modules["corelib/number"] = function(Opal) {
     function $Number(){};
     var self = $Number = $klass($base, $super, 'Number', $Number);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_33, TMP_34, TMP_35, TMP_36, TMP_37, TMP_38, TMP_39, TMP_40, TMP_41, TMP_42, TMP_43, TMP_44, TMP_45, TMP_46, TMP_47, TMP_48, TMP_49, TMP_50, TMP_51, TMP_52, TMP_54, TMP_55, TMP_56, TMP_57, TMP_58, TMP_59, TMP_61, TMP_62, TMP_63, TMP_64, TMP_65, TMP_66, TMP_67;
 
     $scope.get('Opal').$bridge(self, Number);
 
     Number.prototype.$$is_number = true;
 
-    Opal.defn(self, '$coerce', function(other) {
+    Opal.defn(self, '$coerce', TMP_1 = function ːcoerce(other) {
       var self = this;
 
       
@@ -13620,17 +13986,17 @@ Opal.modules["corelib/number"] = function(Opal) {
         self.$raise($scope.get('TypeError'), "can't convert " + (other.$class()) + " into Float");
       }
     ;
-    });
+    }, TMP_1.$$arity = 1);
 
-    Opal.defn(self, '$__id__', function() {
+    Opal.defn(self, '$__id__', TMP_2 = function ː__id__() {
       var self = this;
 
       return (self * 2) + 1;
-    });
+    }, TMP_2.$$arity = 0);
 
     Opal.alias(self, 'object_id', '__id__');
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_3 = function(other) {
       var self = this;
 
       
@@ -13641,9 +14007,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("+", other);
       }
     
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$-', function(other) {
+    Opal.defn(self, '$-', TMP_4 = function(other) {
       var self = this;
 
       
@@ -13654,9 +14020,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("-", other);
       }
     
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$*', function(other) {
+    Opal.defn(self, '$*', TMP_5 = function(other) {
       var self = this;
 
       
@@ -13667,9 +14033,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("*", other);
       }
     
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$/', function(other) {
+    Opal.defn(self, '$/', TMP_6 = function(other) {
       var self = this;
 
       
@@ -13680,11 +14046,11 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("/", other);
       }
     
-    });
+    }, TMP_6.$$arity = 1);
 
     Opal.alias(self, 'fdiv', '/');
 
-    Opal.defn(self, '$%', function(other) {
+    Opal.defn(self, '$%', TMP_7 = function(other) {
       var self = this;
 
       
@@ -13706,9 +14072,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("%", other);
       }
     
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$&', function(other) {
+    Opal.defn(self, '$&', TMP_8 = function(other) {
       var self = this;
 
       
@@ -13719,9 +14085,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("&", other);
       }
     
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$|', function(other) {
+    Opal.defn(self, '$|', TMP_9 = function(other) {
       var self = this;
 
       
@@ -13732,9 +14098,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("|", other);
       }
     
-    });
+    }, TMP_9.$$arity = 1);
 
-    Opal.defn(self, '$^', function(other) {
+    Opal.defn(self, '$^', TMP_10 = function(other) {
       var self = this;
 
       
@@ -13745,9 +14111,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("^", other);
       }
     
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defn(self, '$<', function(other) {
+    Opal.defn(self, '$<', TMP_11 = function(other) {
       var self = this;
 
       
@@ -13758,9 +14124,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("<", other);
       }
     
-    });
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$<=', function(other) {
+    Opal.defn(self, '$<=', TMP_12 = function(other) {
       var self = this;
 
       
@@ -13771,9 +14137,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__("<=", other);
       }
     
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$>', function(other) {
+    Opal.defn(self, '$>', TMP_13 = function(other) {
       var self = this;
 
       
@@ -13784,9 +14150,9 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__(">", other);
       }
     
-    });
+    }, TMP_13.$$arity = 1);
 
-    Opal.defn(self, '$>=', function(other) {
+    Opal.defn(self, '$>=', TMP_14 = function(other) {
       var self = this;
 
       
@@ -13797,103 +14163,111 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self.$__coerced__(">=", other);
       }
     
-    });
+    }, TMP_14.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
-      var self = this;
-
-      try {
-      
+    
+    var spaceship_operator = function(self, other) {
       if (other.$$is_number) {
         if (isNaN(self) || isNaN(other)) {
           return nil;
         }
 
-        return self > other ? 1 : (self < other ? -1 : 0);
+        if (self > other) {
+          return 1;
+        } else if (self < other) {
+          return -1;
+        } else {
+          return 0;
+        }
       }
       else {
         return self.$__coerced__("<=>", other);
       }
-    
-      } catch ($err) {if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
-        try {
-          return nil
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
-      };
-    });
+    }
+  
 
-    Opal.defn(self, '$<<', function(count) {
+    Opal.defn(self, '$<=>', TMP_15 = function(other) {
+      var self = this;
+
+      try {
+        
+      return spaceship_operator(self, other);
+    
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
+          try {
+            return nil
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
+      };
+    }, TMP_15.$$arity = 1);
+
+    Opal.defn(self, '$<<', TMP_16 = function(count) {
       var self = this;
 
       count = $scope.get('Opal')['$coerce_to!'](count, $scope.get('Integer'), "to_int");
       return count > 0 ? self << count : self >> -count;
-    });
+    }, TMP_16.$$arity = 1);
 
-    Opal.defn(self, '$>>', function(count) {
+    Opal.defn(self, '$>>', TMP_17 = function(count) {
       var self = this;
 
       count = $scope.get('Opal')['$coerce_to!'](count, $scope.get('Integer'), "to_int");
       return count > 0 ? self >> count : self << -count;
-    });
+    }, TMP_17.$$arity = 1);
 
-    Opal.defn(self, '$[]', function(bit) {
+    Opal.defn(self, '$[]', TMP_18 = function(bit) {
       var self = this;
 
       bit = $scope.get('Opal')['$coerce_to!'](bit, $scope.get('Integer'), "to_int");
       
-      if (bit < (($scope.get('Integer')).$$scope.get('MIN')) || bit > (($scope.get('Integer')).$$scope.get('MAX'))) {
+      if (bit < 0) {
         return 0;
       }
-
-      if (self < 0) {
-        return (((~self) + 1) >> bit) % 2;
+      if (bit >= 32) {
+        return self < 0 ? 1 : 0;
       }
-      else {
-        return (self >> bit) % 2;
-      }
+      return (self >> bit) & 1;
     ;
-    });
+    }, TMP_18.$$arity = 1);
 
-    Opal.defn(self, '$+@', function() {
+    Opal.defn(self, '$+@', TMP_19 = function() {
       var self = this;
 
       return +self;
-    });
+    }, TMP_19.$$arity = 0);
 
-    Opal.defn(self, '$-@', function() {
+    Opal.defn(self, '$-@', TMP_20 = function() {
       var self = this;
 
       return -self;
-    });
+    }, TMP_20.$$arity = 0);
 
-    Opal.defn(self, '$~', function() {
+    Opal.defn(self, '$~', TMP_21 = function() {
       var self = this;
 
       return ~self;
-    });
+    }, TMP_21.$$arity = 0);
 
-    Opal.defn(self, '$**', function(other) {
+    Opal.defn(self, '$**', TMP_22 = function(other) {
       var $a, $b, $c, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = ((($b = ($scope.get('Integer')['$==='](self))['$!']()) !== false && $b !== nil) ? $b : $rb_gt(other, 0))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ((($b = ($scope.get('Integer')['$==='](self))['$!']()) !== false && $b !== nil && $b != null) ? $b : $rb_gt(other, 0))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return Math.pow(self, other);
           } else {
           return $scope.get('Rational').$new(self, 1)['$**'](other)
         }
-      } else if ((($a = (($b = $rb_lt(self, 0)) ? (((($c = $scope.get('Float')['$==='](other)) !== false && $c !== nil) ? $c : $scope.get('Rational')['$==='](other))) : $rb_lt(self, 0))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = (($b = $rb_lt(self, 0)) ? (((($c = $scope.get('Float')['$==='](other)) !== false && $c !== nil && $c != null) ? $c : $scope.get('Rational')['$==='](other))) : $rb_lt(self, 0))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Complex').$new(self, 0)['$**'](other.$to_f())
-      } else if ((($a = other.$$is_number != null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = other.$$is_number != null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return Math.pow(self, other);
         } else {
         return self.$__coerced__("**", other)
       };
-    });
+    }, TMP_22.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_23 = function(other) {
       var self = this;
 
       
@@ -13907,24 +14281,24 @@ Opal.modules["corelib/number"] = function(Opal) {
         return false;
       }
     ;
-    });
+    }, TMP_23.$$arity = 1);
 
-    Opal.defn(self, '$abs', function() {
+    Opal.defn(self, '$abs', TMP_24 = function ːabs() {
       var self = this;
 
       return Math.abs(self);
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$abs2', function() {
+    Opal.defn(self, '$abs2', TMP_25 = function ːabs2() {
       var self = this;
 
       return Math.abs(self * self);
-    });
+    }, TMP_25.$$arity = 0);
 
-    Opal.defn(self, '$angle', function() {
+    Opal.defn(self, '$angle', TMP_26 = function ːangle() {
       var $a, self = this;
 
-      if ((($a = self['$nan?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$nan?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self};
       
       if (self == 0) {
@@ -13942,16 +14316,16 @@ Opal.modules["corelib/number"] = function(Opal) {
         return 0;
       }
     
-    });
+    }, TMP_26.$$arity = 0);
 
     Opal.alias(self, 'arg', 'angle');
 
     Opal.alias(self, 'phase', 'angle');
 
-    Opal.defn(self, '$bit_length', function() {
+    Opal.defn(self, '$bit_length', TMP_27 = function ːbit_length() {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('NoMethodError').$new("undefined method `bit_length` for " + (self) + ":Float", "bit_length"))
       };
@@ -13970,90 +14344,89 @@ Opal.modules["corelib/number"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_27.$$arity = 0);
 
-    Opal.defn(self, '$ceil', function() {
+    Opal.defn(self, '$ceil', TMP_28 = function ːceil() {
       var self = this;
 
       return Math.ceil(self);
-    });
+    }, TMP_28.$$arity = 0);
 
-    Opal.defn(self, '$chr', function(encoding) {
+    Opal.defn(self, '$chr', TMP_29 = function ːchr(encoding) {
       var self = this;
 
       return String.fromCharCode(self);
-    });
+    }, TMP_29.$$arity = -1);
 
-    Opal.defn(self, '$denominator', TMP_1 = function() {
-      var $a, $b, self = this, $iter = TMP_1.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$denominator', TMP_30 = function ːdenominator() {
+      var $a, $b, self = this, $iter = TMP_30.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_1.$$p = null;
+      TMP_30.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil) ? $b : self['$infinite?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil && $b != null) ? $b : self['$infinite?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return 1
         } else {
-        return Opal.find_super_dispatcher(self, 'denominator', TMP_1, $iter).apply(self, $zuper)
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'denominator', TMP_30, false)), $a.$$p = $iter, $a).apply($b, $zuper)
       };
-    });
+    }, TMP_30.$$arity = 0);
 
-    Opal.defn(self, '$downto', TMP_2 = function(stop) {
-      var $a, $b, TMP_3, self = this, $iter = TMP_2.$$p, block = $iter || nil;
+    Opal.defn(self, '$downto', TMP_31 = function ːdownto(stop) {
+      var $a, $b, TMP_32, self = this, $iter = TMP_31.$$p, block = $iter || nil;
 
-      TMP_2.$$p = null;
+      TMP_31.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_3 = function(){var self = TMP_3.$$s || this, $a;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_32 = function(){var self = TMP_32.$$s || this, $c;
 
-        if ((($a = $scope.get('Numeric')['$==='](stop)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($c = $scope.get('Numeric')['$==='](stop)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             } else {
             self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (stop.$class()) + " failed")
           };
-          if ((($a = $rb_gt(stop, self)) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($c = $rb_gt(stop, self)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             return 0
             } else {
             return $rb_plus($rb_minus(self, stop), 1)
-          };}, TMP_3.$$s = self, TMP_3), $a).call($b, "downto", stop)
+          };}, TMP_32.$$s = self, TMP_32.$$arity = 0, TMP_32), $a).call($b, "downto", stop)
       };
       
       if (!stop.$$is_number) {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (stop.$class()) + " failed")
       }
       for (var i = self; i >= stop; i--) {
-        if (block(i) === $breaker) {
-          return $breaker.$v;
-        }
+        block(i);
       }
     ;
       return self;
-    });
+    }, TMP_31.$$arity = 1);
 
     Opal.alias(self, 'eql?', '==');
 
-    Opal.defn(self, '$equal?', function(other) {
+    Opal.defn(self, '$equal?', TMP_33 = function(other) {
       var $a, self = this;
 
-      return ((($a = self['$=='](other)) !== false && $a !== nil) ? $a : isNaN(self) && isNaN(other));
-    });
+      return ((($a = self['$=='](other)) !== false && $a !== nil && $a != null) ? $a : isNaN(self) && isNaN(other));
+    }, TMP_33.$$arity = 1);
 
-    Opal.defn(self, '$even?', function() {
+    Opal.defn(self, '$even?', TMP_34 = function() {
       var self = this;
 
       return self % 2 === 0;
-    });
+    }, TMP_34.$$arity = 0);
 
-    Opal.defn(self, '$floor', function() {
+    Opal.defn(self, '$floor', TMP_35 = function ːfloor() {
       var self = this;
 
       return Math.floor(self);
-    });
+    }, TMP_35.$$arity = 0);
 
-    Opal.defn(self, '$gcd', function(other) {
+    Opal.defn(self, '$gcd', TMP_36 = function ːgcd(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "not an integer")
       };
@@ -14070,60 +14443,62 @@ Opal.modules["corelib/number"] = function(Opal) {
 
       return max;
     
-    });
+    }, TMP_36.$$arity = 1);
 
-    Opal.defn(self, '$gcdlcm', function(other) {
+    Opal.defn(self, '$gcdlcm', TMP_37 = function ːgcdlcm(other) {
       var self = this;
 
       return [self.$gcd(), self.$lcm()];
-    });
+    }, TMP_37.$$arity = 1);
 
-    Opal.defn(self, '$integer?', function() {
+    Opal.defn(self, '$integer?', TMP_38 = function() {
       var self = this;
 
       return self % 1 === 0;
-    });
+    }, TMP_38.$$arity = 0);
 
-    Opal.defn(self, '$is_a?', TMP_4 = function(klass) {
-      var $a, $b, self = this, $iter = TMP_4.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$is_a?', TMP_39 = function(klass) {
+      var $a, $b, self = this, $iter = TMP_39.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_4.$$p = null;
+      TMP_39.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = (($b = klass['$==']($scope.get('Fixnum'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Fixnum')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Fixnum'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Fixnum')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      if ((($a = (($b = klass['$==']($scope.get('Integer'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Integer')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Integer'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Integer')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      if ((($a = (($b = klass['$==']($scope.get('Float'))) ? $scope.get('Float')['$==='](self) : klass['$==']($scope.get('Float')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Float'))) ? $scope.get('Float')['$==='](self) : klass['$==']($scope.get('Float')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      return Opal.find_super_dispatcher(self, 'is_a?', TMP_4, $iter).apply(self, $zuper);
-    });
+      return ($a = ($b = self, Opal.find_super_dispatcher(self, 'is_a?', TMP_39, false)), $a.$$p = $iter, $a).apply($b, $zuper);
+    }, TMP_39.$$arity = 1);
 
     Opal.alias(self, 'kind_of?', 'is_a?');
 
-    Opal.defn(self, '$instance_of?', TMP_5 = function(klass) {
-      var $a, $b, self = this, $iter = TMP_5.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$instance_of?', TMP_40 = function(klass) {
+      var $a, $b, self = this, $iter = TMP_40.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_5.$$p = null;
+      TMP_40.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = (($b = klass['$==']($scope.get('Fixnum'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Fixnum')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Fixnum'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Fixnum')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      if ((($a = (($b = klass['$==']($scope.get('Integer'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Integer')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Integer'))) ? $scope.get('Integer')['$==='](self) : klass['$==']($scope.get('Integer')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      if ((($a = (($b = klass['$==']($scope.get('Float'))) ? $scope.get('Float')['$==='](self) : klass['$==']($scope.get('Float')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = (($b = klass['$==']($scope.get('Float'))) ? $scope.get('Float')['$==='](self) : klass['$==']($scope.get('Float')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return true};
-      return Opal.find_super_dispatcher(self, 'instance_of?', TMP_5, $iter).apply(self, $zuper);
-    });
+      return ($a = ($b = self, Opal.find_super_dispatcher(self, 'instance_of?', TMP_40, false)), $a.$$p = $iter, $a).apply($b, $zuper);
+    }, TMP_40.$$arity = 1);
 
-    Opal.defn(self, '$lcm', function(other) {
+    Opal.defn(self, '$lcm', TMP_41 = function ːlcm(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "not an integer")
       };
@@ -14135,73 +14510,75 @@ Opal.modules["corelib/number"] = function(Opal) {
         return Math.abs(self * other / self.$gcd(other));
       }
     
-    });
+    }, TMP_41.$$arity = 1);
 
     Opal.alias(self, 'magnitude', 'abs');
 
     Opal.alias(self, 'modulo', '%');
 
-    Opal.defn(self, '$next', function() {
+    Opal.defn(self, '$next', TMP_42 = function ːnext() {
       var self = this;
 
       return self + 1;
-    });
+    }, TMP_42.$$arity = 0);
 
-    Opal.defn(self, '$nonzero?', function() {
+    Opal.defn(self, '$nonzero?', TMP_43 = function() {
       var self = this;
 
       return self == 0 ? nil : self;
-    });
+    }, TMP_43.$$arity = 0);
 
-    Opal.defn(self, '$numerator', TMP_6 = function() {
-      var $a, $b, self = this, $iter = TMP_6.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$numerator', TMP_44 = function ːnumerator() {
+      var $a, $b, self = this, $iter = TMP_44.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_6.$$p = null;
+      TMP_44.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil) ? $b : self['$infinite?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil && $b != null) ? $b : self['$infinite?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self
         } else {
-        return Opal.find_super_dispatcher(self, 'numerator', TMP_6, $iter).apply(self, $zuper)
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'numerator', TMP_44, false)), $a.$$p = $iter, $a).apply($b, $zuper)
       };
-    });
+    }, TMP_44.$$arity = 0);
 
-    Opal.defn(self, '$odd?', function() {
+    Opal.defn(self, '$odd?', TMP_45 = function() {
       var self = this;
 
       return self % 2 !== 0;
-    });
+    }, TMP_45.$$arity = 0);
 
-    Opal.defn(self, '$ord', function() {
+    Opal.defn(self, '$ord', TMP_46 = function ːord() {
       var self = this;
 
       return self;
-    });
+    }, TMP_46.$$arity = 0);
 
-    Opal.defn(self, '$pred', function() {
+    Opal.defn(self, '$pred', TMP_47 = function ːpred() {
       var self = this;
 
       return self - 1;
-    });
+    }, TMP_47.$$arity = 0);
 
-    Opal.defn(self, '$quo', TMP_7 = function(other) {
-      var $a, self = this, $iter = TMP_7.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$quo', TMP_48 = function ːquo(other) {
+      var $a, $b, self = this, $iter = TMP_48.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_7.$$p = null;
+      TMP_48.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        return Opal.find_super_dispatcher(self, 'quo', TMP_7, $iter).apply(self, $zuper)
+      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'quo', TMP_48, false)), $a.$$p = $iter, $a).apply($b, $zuper)
         } else {
         return $rb_divide(self, other)
       };
-    });
+    }, TMP_48.$$arity = 1);
 
-    Opal.defn(self, '$rationalize', function(eps) {
+    Opal.defn(self, '$rationalize', TMP_49 = function ːrationalize(eps) {
       var $a, $b, self = this, f = nil, n = nil;
 
       
@@ -14209,13 +14586,13 @@ Opal.modules["corelib/number"] = function(Opal) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (arguments.length) + " for 0..1)");
       }
     ;
-      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Rational').$new(self, 1)
-      } else if ((($a = self['$infinite?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = self['$infinite?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('FloatDomainError'), "Infinity")
-      } else if ((($a = self['$nan?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = self['$nan?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('FloatDomainError'), "NaN")
-      } else if ((($a = eps == null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = eps == null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         $b = $scope.get('Math').$frexp(self), $a = Opal.to_ary($b), f = ($a[0] == null ? nil : $a[0]), n = ($a[1] == null ? nil : $a[1]), $b;
         f = $scope.get('Math').$ldexp(f, (($scope.get('Float')).$$scope.get('MANT_DIG'))).$to_i();
         n = $rb_minus(n, (($scope.get('Float')).$$scope.get('MANT_DIG')));
@@ -14223,20 +14600,20 @@ Opal.modules["corelib/number"] = function(Opal) {
         } else {
         return self.$to_r().$rationalize(eps)
       };
-    });
+    }, TMP_49.$$arity = -1);
 
-    Opal.defn(self, '$round', function(ndigits) {
+    Opal.defn(self, '$round', TMP_50 = function ːround(ndigits) {
       var $a, $b, self = this, _ = nil, exp = nil;
 
-      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = ndigits == null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ndigits == null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self};
-        if ((($a = ($b = $scope.get('Float')['$==='](ndigits), $b !== false && $b !== nil ?ndigits['$infinite?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ($b = $scope.get('Float')['$==='](ndigits), $b !== false && $b !== nil && $b != null ?ndigits['$infinite?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('RangeError'), "Infinity")};
         ndigits = $scope.get('Opal')['$coerce_to!'](ndigits, $scope.get('Integer'), "to_int");
-        if ((($a = $rb_lt(ndigits, (($scope.get('Integer')).$$scope.get('MIN')))) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(ndigits, (($scope.get('Integer')).$$scope.get('MIN')))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('RangeError'), "out of bounds")};
-        if ((($a = ndigits >= 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ndigits >= 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self};
         ndigits = ndigits['$-@']();
         
@@ -14250,47 +14627,47 @@ Opal.modules["corelib/number"] = function(Opal) {
         return self < 0 ? -x : x;
       ;
         } else {
-        if ((($a = ($b = self['$nan?'](), $b !== false && $b !== nil ?ndigits == null : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ($b = self['$nan?'](), $b !== false && $b !== nil && $b != null ?ndigits == null : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('FloatDomainError'), "NaN")};
         ndigits = $scope.get('Opal')['$coerce_to!'](ndigits || 0, $scope.get('Integer'), "to_int");
-        if ((($a = $rb_le(ndigits, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
-          if ((($a = self['$nan?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_le(ndigits, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          if ((($a = self['$nan?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             self.$raise($scope.get('RangeError'), "NaN")
-          } else if ((($a = self['$infinite?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+          } else if ((($a = self['$infinite?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
             self.$raise($scope.get('FloatDomainError'), "Infinity")}
         } else if (ndigits['$=='](0)) {
           return Math.round(self)
-        } else if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil) ? $b : self['$infinite?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+        } else if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil && $b != null) ? $b : self['$infinite?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self};
         $b = $scope.get('Math').$frexp(self), $a = Opal.to_ary($b), _ = ($a[0] == null ? nil : $a[0]), exp = ($a[1] == null ? nil : $a[1]), $b;
-        if ((($a = $rb_ge(ndigits, $rb_minus(($rb_plus((($scope.get('Float')).$$scope.get('DIG')), 2)), ((function() {if ((($b = $rb_gt(exp, 0)) !== nil && (!$b.$$is_boolean || $b == true))) {
+        if ((($a = $rb_ge(ndigits, $rb_minus(($rb_plus((($scope.get('Float')).$$scope.get('DIG')), 2)), ((function() {if ((($b = $rb_gt(exp, 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           return $rb_divide(exp, 4)
           } else {
           return $rb_minus($rb_divide(exp, 3), 1)
-        }; return nil; })())))) !== nil && (!$a.$$is_boolean || $a == true))) {
+        }; return nil; })())))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self};
-        if ((($a = $rb_lt(ndigits, ((function() {if ((($b = $rb_gt(exp, 0)) !== nil && (!$b.$$is_boolean || $b == true))) {
+        if ((($a = $rb_lt(ndigits, ((function() {if ((($b = $rb_gt(exp, 0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           return $rb_plus($rb_divide(exp, 3), 1)
           } else {
           return $rb_divide(exp, 4)
-        }; return nil; })())['$-@']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+        }; return nil; })())['$-@']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return 0};
         return Math.round(self * Math.pow(10, ndigits)) / Math.pow(10, ndigits);
       };
-    });
+    }, TMP_50.$$arity = -1);
 
-    Opal.defn(self, '$step', TMP_8 = function(limit, step) {
-      var $a, self = this, $iter = TMP_8.$$p, block = $iter || nil;
+    Opal.defn(self, '$step', TMP_51 = function ːstep(limit, step) {
+      var $a, self = this, $iter = TMP_51.$$p, block = $iter || nil;
 
       if (step == null) {
-        step = 1
+        step = 1;
       }
-      TMP_8.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_51.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
         return self.$enum_for("step", limit, step)
       };
-      if ((($a = step == 0) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = step == 0) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "step cannot be 0")};
       
       var value = self;
@@ -14314,46 +14691,46 @@ Opal.modules["corelib/number"] = function(Opal) {
       }
     
       return self;
-    });
+    }, TMP_51.$$arity = -2);
 
     Opal.alias(self, 'succ', 'next');
 
-    Opal.defn(self, '$times', TMP_9 = function() {
-      var self = this, $iter = TMP_9.$$p, block = $iter || nil;
+    Opal.defn(self, '$times', TMP_52 = function ːtimes() {
+      var $a, $b, TMP_53, self = this, $iter = TMP_52.$$p, block = $iter || nil;
 
-      TMP_9.$$p = null;
-      if (block !== false && block !== nil) {
+      TMP_52.$$p = null;
+      if (block !== false && block !== nil && block != null) {
         } else {
-        return self.$enum_for("times")
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_53 = function(){var self = TMP_53.$$s || this;
+
+        return self}, TMP_53.$$s = self, TMP_53.$$arity = 0, TMP_53), $a).call($b, "times")
       };
       
       for (var i = 0; i < self; i++) {
-        if (block(i) === $breaker) {
-          return $breaker.$v;
-        }
+        block(i);
       }
     
       return self;
-    });
+    }, TMP_52.$$arity = 0);
 
-    Opal.defn(self, '$to_f', function() {
+    Opal.defn(self, '$to_f', TMP_54 = function ːto_f() {
       var self = this;
 
       return self;
-    });
+    }, TMP_54.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function() {
+    Opal.defn(self, '$to_i', TMP_55 = function ːto_i() {
       var self = this;
 
       return parseInt(self, 10);
-    });
+    }, TMP_55.$$arity = 0);
 
     Opal.alias(self, 'to_int', 'to_i');
 
-    Opal.defn(self, '$to_r', function() {
+    Opal.defn(self, '$to_r', TMP_56 = function ːto_r() {
       var $a, $b, self = this, f = nil, e = nil;
 
-      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](self)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Rational').$new(self, 1)
         } else {
         $b = $scope.get('Math').$frexp(self), $a = Opal.to_ary($b), f = ($a[0] == null ? nil : $a[0]), e = ($a[1] == null ? nil : $a[1]), $b;
@@ -14361,96 +14738,95 @@ Opal.modules["corelib/number"] = function(Opal) {
         e = $rb_minus(e, (($scope.get('Float')).$$scope.get('MANT_DIG')));
         return ($rb_times(f, ((($scope.get('Float')).$$scope.get('RADIX'))['$**'](e)))).$to_r();
       };
-    });
+    }, TMP_56.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function(base) {
+    Opal.defn(self, '$to_s', TMP_57 = function ːto_s(base) {
       var $a, $b, self = this;
 
       if (base == null) {
-        base = 10
+        base = 10;
       }
-      if ((($a = ((($b = $rb_lt(base, 2)) !== false && $b !== nil) ? $b : $rb_gt(base, 36))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = $rb_lt(base, 2)) !== false && $b !== nil && $b != null) ? $b : $rb_gt(base, 36))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "base must be between 2 and 36")};
       return self.toString(base);
-    });
+    }, TMP_57.$$arity = -1);
 
     Opal.alias(self, 'truncate', 'to_i');
 
     Opal.alias(self, 'inspect', 'to_s');
 
-    Opal.defn(self, '$divmod', TMP_10 = function(other) {
-      var $a, $b, self = this, $iter = TMP_10.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$divmod', TMP_58 = function ːdivmod(other) {
+      var $a, $b, self = this, $iter = TMP_58.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_10.$$p = null;
+      TMP_58.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil) ? $b : other['$nan?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = self['$nan?']()) !== false && $b !== nil && $b != null) ? $b : other['$nan?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('FloatDomainError'), "NaN")
-      } else if ((($a = self['$infinite?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = self['$infinite?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('FloatDomainError'), "Infinity")
         } else {
-        return Opal.find_super_dispatcher(self, 'divmod', TMP_10, $iter).apply(self, $zuper)
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'divmod', TMP_58, false)), $a.$$p = $iter, $a).apply($b, $zuper)
       };
-    });
+    }, TMP_58.$$arity = 1);
 
-    Opal.defn(self, '$upto', TMP_11 = function(stop) {
-      var $a, $b, TMP_12, self = this, $iter = TMP_11.$$p, block = $iter || nil;
+    Opal.defn(self, '$upto', TMP_59 = function ːupto(stop) {
+      var $a, $b, TMP_60, self = this, $iter = TMP_59.$$p, block = $iter || nil;
 
-      TMP_11.$$p = null;
+      TMP_59.$$p = null;
       if ((block !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_12 = function(){var self = TMP_12.$$s || this, $a;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_60 = function(){var self = TMP_60.$$s || this, $c;
 
-        if ((($a = $scope.get('Numeric')['$==='](stop)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($c = $scope.get('Numeric')['$==='](stop)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             } else {
             self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (stop.$class()) + " failed")
           };
-          if ((($a = $rb_lt(stop, self)) !== nil && (!$a.$$is_boolean || $a == true))) {
+          if ((($c = $rb_lt(stop, self)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
             return 0
             } else {
             return $rb_plus($rb_minus(stop, self), 1)
-          };}, TMP_12.$$s = self, TMP_12), $a).call($b, "upto", stop)
+          };}, TMP_60.$$s = self, TMP_60.$$arity = 0, TMP_60), $a).call($b, "upto", stop)
       };
       
       if (!stop.$$is_number) {
         self.$raise($scope.get('ArgumentError'), "comparison of " + (self.$class()) + " with " + (stop.$class()) + " failed")
       }
       for (var i = self; i <= stop; i++) {
-        if (block(i) === $breaker) {
-          return $breaker.$v;
-        }
+        block(i);
       }
     ;
       return self;
-    });
+    }, TMP_59.$$arity = 1);
 
-    Opal.defn(self, '$zero?', function() {
+    Opal.defn(self, '$zero?', TMP_61 = function() {
       var self = this;
 
       return self == 0;
-    });
+    }, TMP_61.$$arity = 0);
 
-    Opal.defn(self, '$size', function() {
+    Opal.defn(self, '$size', TMP_62 = function ːsize() {
       var self = this;
 
       return 4;
-    });
+    }, TMP_62.$$arity = 0);
 
-    Opal.defn(self, '$nan?', function() {
+    Opal.defn(self, '$nan?', TMP_63 = function() {
       var self = this;
 
       return isNaN(self);
-    });
+    }, TMP_63.$$arity = 0);
 
-    Opal.defn(self, '$finite?', function() {
+    Opal.defn(self, '$finite?', TMP_64 = function() {
       var self = this;
 
       return self != Infinity && self != -Infinity && !isNaN(self);
-    });
+    }, TMP_64.$$arity = 0);
 
-    Opal.defn(self, '$infinite?', function() {
+    Opal.defn(self, '$infinite?', TMP_65 = function() {
       var self = this;
 
       
@@ -14464,28 +14840,28 @@ Opal.modules["corelib/number"] = function(Opal) {
         return nil;
       }
     
-    });
+    }, TMP_65.$$arity = 0);
 
-    Opal.defn(self, '$positive?', function() {
+    Opal.defn(self, '$positive?', TMP_66 = function() {
       var self = this;
 
       return self == Infinity || 1 / self > 0;
-    });
+    }, TMP_66.$$arity = 0);
 
-    return (Opal.defn(self, '$negative?', function() {
+    return (Opal.defn(self, '$negative?', TMP_67 = function() {
       var self = this;
 
       return self == -Infinity || 1 / self < 0;
-    }), nil) && 'negative?';
+    }, TMP_67.$$arity = 0), nil) && 'negative?';
   })($scope.base, $scope.get('Numeric'));
   Opal.cdecl($scope, 'Fixnum', $scope.get('Number'));
   (function($base, $super) {
     function $Integer(){};
     var self = $Integer = $klass($base, $super, 'Integer', $Integer);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_68;
 
-    Opal.defs(self, '$===', function(other) {
+    Opal.defs(self, '$===', TMP_68 = function(other) {
       var self = this;
 
       
@@ -14495,7 +14871,7 @@ Opal.modules["corelib/number"] = function(Opal) {
 
       return (other % 1) === 0;
     
-    });
+    }, TMP_68.$$arity = 1);
 
     Opal.cdecl($scope, 'MAX', Math.pow(2, 30) - 1);
 
@@ -14505,13 +14881,13 @@ Opal.modules["corelib/number"] = function(Opal) {
     function $Float(){};
     var self = $Float = $klass($base, $super, 'Float', $Float);
 
-    var def = self.$$proto, $scope = self.$$scope, $a;
+    var def = self.$$proto, $scope = self.$$scope, TMP_69, $a;
 
-    Opal.defs(self, '$===', function(other) {
+    Opal.defs(self, '$===', TMP_69 = function(other) {
       var self = this;
 
       return !!other.$$is_number;
-    });
+    }, TMP_69.$$arity = 1);
 
     Opal.cdecl($scope, 'INFINITY', Infinity);
 
@@ -14527,17 +14903,15 @@ Opal.modules["corelib/number"] = function(Opal) {
 
     Opal.cdecl($scope, 'RADIX', 2);
 
-    if ((($a = (typeof(Number.EPSILON) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Number.EPSILON) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       return Opal.cdecl($scope, 'EPSILON', Number.EPSILON)
       } else {
       return Opal.cdecl($scope, 'EPSILON', 2.2204460492503130808472633361816E-16)
     };
   })($scope.base, $scope.get('Numeric'));
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/range"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_le(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs <= rhs : lhs['$<='](rhs);
   }
@@ -14549,13 +14923,13 @@ Opal.modules["corelib/range"] = function(Opal) {
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
-  Opal.add_stubs(['$require', '$include', '$attr_reader', '$<=>', '$raise', '$include?', '$<=', '$<', '$enum_for', '$upto', '$to_proc', '$succ', '$!', '$==', '$===', '$exclude_end?', '$eql?', '$begin', '$end', '$-', '$abs', '$to_i', '$inspect']);
+  Opal.add_stubs(['$require', '$include', '$attr_reader', '$<=>', '$raise', '$include?', '$<=', '$<', '$enum_for', '$upto', '$to_proc', '$succ', '$!', '$==', '$===', '$exclude_end?', '$eql?', '$begin', '$end', '$-', '$abs', '$to_i', '$inspect', '$[]']);
   self.$require("corelib/enumerable");
   return (function($base, $super) {
     function $Range(){};
     var self = $Range = $klass($base, $super, 'Range', $Range);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13;
 
     def.begin = def.exclude = def.end = nil;
     self.$include($scope.get('Enumerable'));
@@ -14564,22 +14938,22 @@ Opal.modules["corelib/range"] = function(Opal) {
 
     self.$attr_reader("begin", "end");
 
-    Opal.defn(self, '$initialize', function(first, last, exclude) {
+    Opal.defn(self, '$initialize', TMP_1 = function ːinitialize(first, last, exclude) {
       var $a, self = this;
 
       if (exclude == null) {
-        exclude = false
+        exclude = false;
       }
-      if ((($a = first['$<=>'](last)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = first['$<=>'](last)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('ArgumentError'))
       };
       self.begin = first;
       self.end = last;
       return self.exclude = exclude;
-    });
+    }, TMP_1.$$arity = -3);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_2 = function(other) {
       var self = this;
 
       
@@ -14591,90 +14965,81 @@ Opal.modules["corelib/range"] = function(Opal) {
              self.begin   ==  other.begin &&
              self.end     ==  other.end;
     
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defn(self, '$===', function(value) {
+    Opal.defn(self, '$===', TMP_3 = function(value) {
       var self = this;
 
       return self['$include?'](value);
-    });
+    }, TMP_3.$$arity = 1);
 
-    Opal.defn(self, '$cover?', function(value) {
+    Opal.defn(self, '$cover?', TMP_4 = function(value) {
       var $a, $b, self = this;
 
-      return ($a = $rb_le(self.begin, value), $a !== false && $a !== nil ?((function() {if ((($b = self.exclude) !== nil && (!$b.$$is_boolean || $b == true))) {
+      return ($a = $rb_le(self.begin, value), $a !== false && $a !== nil && $a != null ?((function() {if ((($b = self.exclude) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
         return $rb_lt(value, self.end)
         } else {
         return $rb_le(value, self.end)
       }; return nil; })()) : $a);
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$each', TMP_1 = function() {
-      var $a, $b, $c, self = this, $iter = TMP_1.$$p, block = $iter || nil, current = nil, last = nil;
+    Opal.defn(self, '$each', TMP_5 = function ːeach() {
+      var $a, $b, $c, self = this, $iter = TMP_5.$$p, block = $iter || nil, current = nil, last = nil;
 
-      TMP_1.$$p = null;
+      TMP_5.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("each")
       };
       
-      var i, limit, value;
+      var i, limit;
 
       if (self.begin.$$is_number && self.end.$$is_number) {
         if (self.begin % 1 !== 0 || self.end % 1 !== 0) {
           self.$raise($scope.get('TypeError'), "can't iterate from Float")
         }
 
-        for (i = self.begin, limit = self.end + (function() {if ((($a = self.exclude) !== nil && (!$a.$$is_boolean || $a == true))) {
+        for (i = self.begin, limit = self.end + (function() {if ((($a = self.exclude) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return 0
         } else {
         return 1
       }; return nil; })(); i < limit; i++) {
-          value = block(i);
-          if (value === $breaker) { return $breaker.$v; }
+          block(i);
         }
 
         return self;
       }
 
       if (self.begin.$$is_string && self.end.$$is_string) {
-        value = ($a = ($b = self.begin).$upto, $a.$$p = block.$to_proc(), $a).call($b, self.end, self.exclude);
-
-        // The following is a bit hackish: we know that
-        // String#upto normally returns self, but may
-        // return a different value if there's a `break`
-        // statement in the supplied block. We need to
-        // propagate this `break` value here, so we
-        // test for equality with `@begin` string to
-        // determine the return value:
-        return value === self.begin ? self : value;
+        ($a = ($b = self.begin).$upto, $a.$$p = block.$to_proc(), $a).call($b, self.end, self.exclude)
+        return self;
       }
     ;
       current = self.begin;
       last = self.end;
-      while ((($c = $rb_lt(current, last)) !== nil && (!$c.$$is_boolean || $c == true))) {
-      if (Opal.yield1(block, current) === $breaker) return $breaker.$v;
+      while ((($c = $rb_lt(current, last)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
+      Opal.yield1(block, current);
       current = current.$succ();};
-      if ((($a = ($c = self.exclude['$!'](), $c !== false && $c !== nil ?current['$=='](last) : $c)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if (Opal.yield1(block, current) === $breaker) return $breaker.$v};
+      if ((($a = ($c = self.exclude['$!'](), $c !== false && $c !== nil && $c != null ?current['$=='](last) : $c)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        Opal.yield1(block, current)};
       return self;
-    });
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_6 = function(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Range')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Range')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return false
       };
-      return ($a = ($b = self.exclude['$==='](other['$exclude_end?']()), $b !== false && $b !== nil ?self.begin['$eql?'](other.$begin()) : $b), $a !== false && $a !== nil ?self.end['$eql?'](other.$end()) : $a);
-    });
+      return ($a = ($b = self.exclude['$==='](other['$exclude_end?']()), $b !== false && $b !== nil && $b != null ?self.begin['$eql?'](other.$begin()) : $b), $a !== false && $a !== nil && $a != null ?self.end['$eql?'](other.$end()) : $a);
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$exclude_end?', function() {
+    Opal.defn(self, '$exclude_end?', TMP_7 = function() {
       var self = this;
 
       return self.exclude;
-    });
+    }, TMP_7.$$arity = 0);
 
     Opal.alias(self, 'first', 'begin');
 
@@ -14682,81 +15047,89 @@ Opal.modules["corelib/range"] = function(Opal) {
 
     Opal.alias(self, 'last', 'end');
 
-    Opal.defn(self, '$max', TMP_2 = function() {
-      var self = this, $iter = TMP_2.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$max', TMP_8 = function ːmax() {
+      var $a, $b, self = this, $iter = TMP_8.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_2.$$p = null;
+      TMP_8.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
       if (($yield !== nil)) {
-        return Opal.find_super_dispatcher(self, 'max', TMP_2, $iter).apply(self, $zuper)
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'max', TMP_8, false)), $a.$$p = $iter, $a).apply($b, $zuper)
         } else {
         return self.exclude ? self.end - 1 : self.end;
       };
-    });
+    }, TMP_8.$$arity = 0);
 
     Opal.alias(self, 'member?', 'cover?');
 
-    Opal.defn(self, '$min', TMP_3 = function() {
-      var self = this, $iter = TMP_3.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$min', TMP_9 = function ːmin() {
+      var $a, $b, self = this, $iter = TMP_9.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_3.$$p = null;
+      TMP_9.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
       if (($yield !== nil)) {
-        return Opal.find_super_dispatcher(self, 'min', TMP_3, $iter).apply(self, $zuper)
+        return ($a = ($b = self, Opal.find_super_dispatcher(self, 'min', TMP_9, false)), $a.$$p = $iter, $a).apply($b, $zuper)
         } else {
         return self.begin
       };
-    });
+    }, TMP_9.$$arity = 0);
 
     Opal.alias(self, 'member?', 'include?');
 
-    Opal.defn(self, '$size', function() {
+    Opal.defn(self, '$size', TMP_10 = function ːsize() {
       var $a, $b, self = this, _begin = nil, _end = nil, infinity = nil;
 
       _begin = self.begin;
       _end = self.end;
-      if ((($a = self.exclude) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.exclude) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         _end = $rb_minus(_end, 1)};
-      if ((($a = ($b = $scope.get('Numeric')['$==='](_begin), $b !== false && $b !== nil ?$scope.get('Numeric')['$==='](_end) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = $scope.get('Numeric')['$==='](_begin), $b !== false && $b !== nil && $b != null ?$scope.get('Numeric')['$==='](_end) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return nil
       };
-      if ((($a = $rb_lt(_end, _begin)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_lt(_end, _begin)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return 0};
       infinity = (($scope.get('Float')).$$scope.get('INFINITY'));
-      if ((($a = ((($b = infinity['$=='](_begin.$abs())) !== false && $b !== nil) ? $b : _end.$abs()['$=='](infinity))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = infinity['$=='](_begin.$abs())) !== false && $b !== nil && $b != null) ? $b : _end.$abs()['$=='](infinity))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return infinity};
       return ((Math.abs(_end - _begin) + 1)).$to_i();
-    });
+    }, TMP_10.$$arity = 0);
 
-    Opal.defn(self, '$step', function(n) {
+    Opal.defn(self, '$step', TMP_11 = function ːstep(n) {
       var self = this;
 
       if (n == null) {
-        n = 1
+        n = 1;
       }
       return self.$raise($scope.get('NotImplementedError'));
-    });
+    }, TMP_11.$$arity = -1);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_12 = function ːto_s() {
       var self = this;
 
       return self.begin.$inspect() + (self.exclude ? '...' : '..') + self.end.$inspect();
-    });
+    }, TMP_12.$$arity = 0);
 
-    return Opal.alias(self, 'inspect', 'to_s');
+    Opal.alias(self, 'inspect', 'to_s');
+
+    return (Opal.defn(self, '$marshal_load', TMP_13 = function ːmarshal_load(args) {
+      var self = this;
+
+      self.begin = args['$[]']("begin");
+      self.end = args['$[]']("end");
+      return self.exclude = args['$[]']("excl");
+    }, TMP_13.$$arity = 1), nil) && 'marshal_load';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/proc"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$raise', '$coerce_to!']);
@@ -14764,7 +15137,7 @@ Opal.modules["corelib/proc"] = function(Opal) {
     function $Proc(){};
     var self = $Proc = $klass($base, $super, 'Proc', $Proc);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10;
 
     def.$$is_proc = true;
 
@@ -14774,21 +15147,21 @@ Opal.modules["corelib/proc"] = function(Opal) {
       var self = this, $iter = TMP_1.$$p, block = $iter || nil;
 
       TMP_1.$$p = null;
-      if (block !== false && block !== nil) {
+      if (block !== false && block !== nil && block != null) {
         } else {
         self.$raise($scope.get('ArgumentError'), "tried to create a Proc object without a block")
       };
       return block;
-    });
+    }, TMP_1.$$arity = 0);
 
-    Opal.defn(self, '$call', TMP_2 = function() {
-      var self = this, $iter = TMP_2.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$call', TMP_2 = function ːcall($a_rest) {
+      var self = this, args, $iter = TMP_2.$$p, block = $iter || nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
       TMP_2.$$p = null;
       
@@ -14796,22 +15169,37 @@ Opal.modules["corelib/proc"] = function(Opal) {
         self.$$p = block;
       }
 
-      var result;
+      var result, $brk = self.$$brk;
 
-      if (self.$$is_lambda) {
-        result = self.apply(null, args);
+      if ($brk) {
+        try {
+          if (self.$$is_lambda) {
+            result = self.apply(null, args);
+          }
+          else {
+            result = Opal.yieldX(self, args);
+          }
+        } catch (err) {
+          if (err === $brk) {
+            return $brk.$v
+          }
+          else {
+            throw err
+          }
+        }
       }
       else {
-        result = Opal.yieldX(self, args);
-      }
-
-      if (result === $breaker) {
-        return $breaker.$v;
+        if (self.$$is_lambda) {
+          result = self.apply(null, args);
+        }
+        else {
+          result = Opal.yieldX(self, args);
+        }
       }
 
       return result;
     
-    });
+    }, TMP_2.$$arity = -1);
 
     Opal.alias(self, '[]', 'call');
 
@@ -14819,48 +15207,76 @@ Opal.modules["corelib/proc"] = function(Opal) {
 
     Opal.alias(self, 'yield', 'call');
 
-    Opal.defn(self, '$to_proc', function() {
+    Opal.defn(self, '$to_proc', TMP_3 = function ːto_proc() {
       var self = this;
 
       return self;
-    });
+    }, TMP_3.$$arity = 0);
 
-    Opal.defn(self, '$lambda?', function() {
+    Opal.defn(self, '$lambda?', TMP_4 = function() {
       var self = this;
 
       return !!self.$$is_lambda;
-    });
+    }, TMP_4.$$arity = 0);
 
-    Opal.defn(self, '$arity', function() {
+    Opal.defn(self, '$arity', TMP_5 = function ːarity() {
       var self = this;
 
-      if (self.$$is_curried) { return -1; }
-      if (self.$$arity) { return self.$$arity };
-      return self.length;
-    });
+      
+      if (self.$$is_curried) {
+        return -1;
+      } else {
+        return self.$$arity;
+      }
+    
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$source_location', function() {
+    Opal.defn(self, '$source_location', TMP_6 = function ːsource_location() {
       var self = this;
 
       if (self.$$is_curried) { return nil; }
       return nil;
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$binding', function() {
+    Opal.defn(self, '$binding', TMP_7 = function ːbinding() {
       var self = this;
 
       if (self.$$is_curried) { self.$raise($scope.get('ArgumentError'), "Can't create Binding") };
       return nil;
-    });
+    }, TMP_7.$$arity = 0);
 
-    Opal.defn(self, '$parameters', function() {
+    Opal.defn(self, '$parameters', TMP_8 = function ːparameters() {
       var self = this;
 
-      if (self.$$is_curried) { return [["rest"]]; };
-      return nil;
-    });
+      
+      if (self.$$is_curried) {
+        return [["rest"]];
+      } else if (self.$$parameters) {
+        if (self.$$is_lambda) {
+          return self.$$parameters;
+        } else {
+          var result = [], i, length;
 
-    Opal.defn(self, '$curry', function(arity) {
+          for (i = 0, length = self.$$parameters.length; i < length; i++) {
+            var parameter = self.$$parameters[i];
+
+            if (parameter[0] === 'req') {
+              // required arguments always have name
+              parameter = ['opt', parameter[1]];
+            }
+
+            result.push(parameter);
+          }
+
+          return result;
+        }
+      } else {
+        return [];
+      }
+    ;
+    }, TMP_8.$$arity = 0);
+
+    Opal.defn(self, '$curry', TMP_9 = function ːcurry(arity) {
       var self = this;
 
       
@@ -14901,9 +15317,9 @@ Opal.modules["corelib/proc"] = function(Opal) {
       curried.$$is_curried = true;
       return curried;
     
-    });
+    }, TMP_9.$$arity = -1);
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_10 = function ːdup() {
       var self = this;
 
       
@@ -14920,15 +15336,13 @@ Opal.modules["corelib/proc"] = function(Opal) {
 
       return proc;
     
-    });
+    }, TMP_10.$$arity = 0);
 
     return Opal.alias(self, 'clone', 'dup');
   })($scope.base, Function)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/method"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$attr_reader', '$class', '$arity', '$new', '$name']);
@@ -14936,52 +15350,58 @@ Opal.modules["corelib/method"] = function(Opal) {
     function $Method(){};
     var self = $Method = $klass($base, $super, 'Method', $Method);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7;
 
     def.method = def.receiver = def.owner = def.name = nil;
     self.$attr_reader("owner", "receiver", "name");
 
-    Opal.defn(self, '$initialize', function(receiver, method, name) {
+    Opal.defn(self, '$initialize', TMP_1 = function ːinitialize(receiver, method, name) {
       var self = this;
 
       self.receiver = receiver;
       self.owner = receiver.$class();
       self.name = name;
       return self.method = method;
-    });
+    }, TMP_1.$$arity = 3);
 
-    Opal.defn(self, '$arity', function() {
+    Opal.defn(self, '$arity', TMP_2 = function ːarity() {
       var self = this;
 
       return self.method.$arity();
-    });
+    }, TMP_2.$$arity = 0);
 
-    Opal.defn(self, '$call', TMP_1 = function() {
-      var self = this, $iter = TMP_1.$$p, block = $iter || nil, $splat_index = nil;
+    Opal.defn(self, '$parameters', TMP_3 = function ːparameters() {
+      var self = this;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      return self.method.$$parameters;
+    }, TMP_3.$$arity = 0);
+
+    Opal.defn(self, '$call', TMP_4 = function ːcall($a_rest) {
+      var self = this, args, $iter = TMP_4.$$p, block = $iter || nil;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_1.$$p = null;
+      TMP_4.$$p = null;
       
       self.method.$$p = block;
 
       return self.method.apply(self.receiver, args);
     ;
-    });
+    }, TMP_4.$$arity = -1);
 
     Opal.alias(self, '[]', 'call');
 
-    Opal.defn(self, '$unbind', function() {
+    Opal.defn(self, '$unbind', TMP_5 = function ːunbind() {
       var self = this;
 
       return $scope.get('UnboundMethod').$new(self.owner, self.method, self.name);
-    });
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$to_proc', function() {
+    Opal.defn(self, '$to_proc', TMP_6 = function ːto_proc() {
       var self = this;
 
       
@@ -14990,54 +15410,58 @@ Opal.modules["corelib/method"] = function(Opal) {
       proc.$$is_lambda = true;
       return proc;
     
-    });
+    }, TMP_6.$$arity = 0);
 
-    return (Opal.defn(self, '$inspect', function() {
+    return (Opal.defn(self, '$inspect', TMP_7 = function ːinspect() {
       var self = this;
 
       return "#<Method: " + (self.receiver.$class()) + "#" + (self.name) + ">";
-    }), nil) && 'inspect';
+    }, TMP_7.$$arity = 0), nil) && 'inspect';
   })($scope.base, null);
   return (function($base, $super) {
     function $UnboundMethod(){};
     var self = $UnboundMethod = $klass($base, $super, 'UnboundMethod', $UnboundMethod);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12;
 
     def.method = def.name = def.owner = nil;
     self.$attr_reader("owner", "name");
 
-    Opal.defn(self, '$initialize', function(owner, method, name) {
+    Opal.defn(self, '$initialize', TMP_8 = function ːinitialize(owner, method, name) {
       var self = this;
 
       self.owner = owner;
       self.method = method;
       return self.name = name;
-    });
+    }, TMP_8.$$arity = 3);
 
-    Opal.defn(self, '$arity', function() {
+    Opal.defn(self, '$arity', TMP_9 = function ːarity() {
       var self = this;
 
       return self.method.$arity();
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$bind', function(object) {
+    Opal.defn(self, '$parameters', TMP_10 = function ːparameters() {
+      var self = this;
+
+      return self.method.$$parameters;
+    }, TMP_10.$$arity = 0);
+
+    Opal.defn(self, '$bind', TMP_11 = function ːbind(object) {
       var self = this;
 
       return $scope.get('Method').$new(object, self.method, self.name);
-    });
+    }, TMP_11.$$arity = 1);
 
-    return (Opal.defn(self, '$inspect', function() {
+    return (Opal.defn(self, '$inspect', TMP_12 = function ːinspect() {
       var self = this;
 
       return "#<UnboundMethod: " + (self.owner.$name()) + "#" + (self.name) + ">";
-    }), nil) && 'inspect';
+    }, TMP_12.$$arity = 0), nil) && 'inspect';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/variables"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $gvars = Opal.gvars, $hash2 = Opal.hash2;
 
   Opal.add_stubs(['$new']);
@@ -15053,10 +15477,35 @@ Opal.modules["corelib/variables"] = function(Opal) {
   $gvars.DEBUG = false;
   return $gvars.SAFE = 0;
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
+Opal.modules["opal/regexp_anchors"] = function(Opal) {
+  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $module = Opal.module;
+
+  Opal.add_stubs(['$==', '$new']);
+  return (function($base) {
+    var $Opal, self = $Opal = $module($base, 'Opal');
+
+    var def = self.$$proto, $scope = self.$$scope;
+
+    Opal.cdecl($scope, 'REGEXP_START', (function() {if ($scope.get('RUBY_ENGINE')['$==']("opal")) {
+      return "^"}; return nil; })());
+
+    Opal.cdecl($scope, 'REGEXP_END', (function() {if ($scope.get('RUBY_ENGINE')['$==']("opal")) {
+      return "$"}; return nil; })());
+
+    Opal.cdecl($scope, 'FORBIDDEN_STARTING_IDENTIFIER_CHARS', "\\u0001-\\u002F\\u003A-\\u0040\\u005B-\\u005E\\u0060\\u007B-\\u007F");
+
+    Opal.cdecl($scope, 'FORBIDDEN_ENDING_IDENTIFIER_CHARS', "\\u0001-\\u0020\\u0022-\\u002F\\u003A-\\u003E\\u0040\\u005B-\\u005E\\u0060\\u007B-\\u007F");
+
+    Opal.cdecl($scope, 'INLINE_IDENTIFIER_REGEXP', $scope.get('Regexp').$new("[^" + ($scope.get('FORBIDDEN_STARTING_IDENTIFIER_CHARS')) + "]*[^" + ($scope.get('FORBIDDEN_ENDING_IDENTIFIER_CHARS')) + "]"));
+
+    Opal.cdecl($scope, 'FORBIDDEN_CONST_NAME_CHARS', "\\u0001-\\u0020\\u0021-\\u002F\\u003B-\\u003F\\u0040\\u005B-\\u005E\\u0060\\u007B-\\u007F");
+
+    Opal.cdecl($scope, 'CONST_NAME_REGEXP', $scope.get('Regexp').$new("" + ($scope.get('REGEXP_START')) + "(::)?[A-Z][^" + ($scope.get('FORBIDDEN_CONST_NAME_CHARS')) + "]*" + ($scope.get('REGEXP_END'))));
+  })($scope.base)
+};
+/* Generated by Opal 0.10.1 */
 Opal.modules["opal/mini"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
 
   Opal.add_stubs(['$require']);
@@ -15074,256 +15523,31 @@ Opal.modules["opal/mini"] = function(Opal) {
   self.$require("corelib/proc");
   self.$require("corelib/method");
   self.$require("corelib/regexp");
-  return self.$require("corelib/variables");
+  self.$require("corelib/variables");
+  return self.$require("opal/regexp_anchors");
 };
-/* Generated by Opal 0.9.2 */
-Opal.modules["corelib/array/inheritance"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
+/* Generated by Opal 0.10.1 */
+Opal.modules["corelib/string/inheritance"] = function(Opal) {
+  function $rb_plus(lhs, rhs) {
+    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
+  }
   function $rb_times(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs * rhs : lhs['$*'](rhs);
   }
   function $rb_minus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs - rhs : lhs['$-'](rhs);
   }
-  function $rb_plus(lhs, rhs) {
-    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
-  }
-  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
-
-  Opal.add_stubs(['$new', '$allocate', '$initialize', '$to_proc', '$__send__', '$clone', '$respond_to?', '$==', '$eql?', '$inspect', '$hash', '$*', '$class', '$slice', '$uniq', '$flatten', '$-', '$+']);
-  (function($base, $super) {
-    function $Array(){};
-    var self = $Array = $klass($base, $super, 'Array', $Array);
-
-    var def = self.$$proto, $scope = self.$$scope;
-
-    return (Opal.defs(self, '$inherited', function(klass) {
-      var self = this, replace = nil;
-
-      replace = $scope.get('Class').$new((($scope.get('Array')).$$scope.get('Wrapper')));
-      
-      klass.$$proto         = replace.$$proto;
-      klass.$$proto.$$class = klass;
-      klass.$$alloc         = replace.$$alloc;
-      klass.$$parent        = (($scope.get('Array')).$$scope.get('Wrapper'));
-
-      klass.$allocate = replace.$allocate;
-      klass.$new      = replace.$new;
-      klass["$[]"]    = replace["$[]"];
-    
-    }), nil) && 'inherited'
-  })($scope.base, null);
-  return (function($base, $super) {
-    function $Wrapper(){};
-    var self = $Wrapper = $klass($base, $super, 'Wrapper', $Wrapper);
-
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5;
-
-    def.literal = nil;
-    def.$$is_array = true;
-
-    Opal.defs(self, '$allocate', TMP_1 = function(array) {
-      var self = this, $iter = TMP_1.$$p, $yield = $iter || nil, obj = nil;
-
-      if (array == null) {
-        array = []
-      }
-      TMP_1.$$p = null;
-      obj = Opal.find_super_dispatcher(self, 'allocate', TMP_1, null, $Wrapper).apply(self, []);
-      obj.literal = array;
-      return obj;
-    });
-
-    Opal.defs(self, '$new', TMP_2 = function() {
-      var $a, $b, self = this, $iter = TMP_2.$$p, block = $iter || nil, obj = nil, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
-      }
-      TMP_2.$$p = null;
-      obj = self.$allocate();
-      ($a = ($b = obj).$initialize, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
-      return obj;
-    });
-
-    Opal.defs(self, '$[]', function() {
-      var self = this, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 0];
-      }
-      return self.$allocate(objects);
-    });
-
-    Opal.defn(self, '$initialize', TMP_3 = function() {
-      var $a, $b, self = this, $iter = TMP_3.$$p, block = $iter || nil, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
-      }
-      TMP_3.$$p = null;
-      return self.literal = ($a = ($b = $scope.get('Array')).$new, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
-    });
-
-    Opal.defn(self, '$method_missing', TMP_4 = function() {
-      var $a, $b, self = this, $iter = TMP_4.$$p, block = $iter || nil, result = nil, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
-      }
-      TMP_4.$$p = null;
-      result = ($a = ($b = self.literal).$__send__, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
-      if ((($a = result === self.literal) !== nil && (!$a.$$is_boolean || $a == true))) {
-        return self
-        } else {
-        return result
-      };
-    });
-
-    Opal.defn(self, '$initialize_copy', function(other) {
-      var self = this;
-
-      return self.literal = (other.literal).$clone();
-    });
-
-    Opal.defn(self, '$respond_to?', TMP_5 = function(name) {
-      var $a, self = this, $iter = TMP_5.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
-
-      TMP_5.$$p = null;
-      $zuper = [];
-      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
-        $zuper[$zuper_index] = arguments[$zuper_index];
-      }
-      return ((($a = Opal.find_super_dispatcher(self, 'respond_to?', TMP_5, $iter).apply(self, $zuper)) !== false && $a !== nil) ? $a : self.literal['$respond_to?'](name));
-    });
-
-    Opal.defn(self, '$==', function(other) {
-      var self = this;
-
-      return self.literal['$=='](other);
-    });
-
-    Opal.defn(self, '$eql?', function(other) {
-      var self = this;
-
-      return self.literal['$eql?'](other);
-    });
-
-    Opal.defn(self, '$to_a', function() {
-      var self = this;
-
-      return self.literal;
-    });
-
-    Opal.defn(self, '$to_ary', function() {
-      var self = this;
-
-      return self;
-    });
-
-    Opal.defn(self, '$inspect', function() {
-      var self = this;
-
-      return self.literal.$inspect();
-    });
-
-    Opal.defn(self, '$hash', function() {
-      var self = this;
-
-      return self.literal.$hash();
-    });
-
-    Opal.defn(self, '$*', function(other) {
-      var self = this;
-
-      
-      var result = $rb_times(self.literal, other);
-
-      if (result.$$is_array) {
-        return self.$class().$allocate(result)
-      }
-      else {
-        return result;
-      }
-    ;
-    });
-
-    Opal.defn(self, '$[]', function(index, length) {
-      var self = this;
-
-      
-      var result = self.literal.$slice(index, length);
-
-      if (result.$$is_array && (index.$$is_range || length !== undefined)) {
-        return self.$class().$allocate(result)
-      }
-      else {
-        return result;
-      }
-    ;
-    });
-
-    Opal.alias(self, 'slice', '[]');
-
-    Opal.defn(self, '$uniq', function() {
-      var self = this;
-
-      return self.$class().$allocate(self.literal.$uniq());
-    });
-
-    Opal.defn(self, '$flatten', function(level) {
-      var self = this;
-
-      return self.$class().$allocate(self.literal.$flatten(level));
-    });
-
-    Opal.defn(self, '$-', function(other) {
-      var self = this;
-
-      return $rb_minus(self.literal, other);
-    });
-
-    return (Opal.defn(self, '$+', function(other) {
-      var self = this;
-
-      return $rb_plus(self.literal, other);
-    }), nil) && '+';
-  })($scope.get('Array'), null);
-};
-/* Generated by Opal 0.9.2 */
-Opal.modules["corelib/string/inheritance"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
-  function $rb_plus(lhs, rhs) {
-    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
-  }
-  function $rb_times(lhs, rhs) {
-    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs * rhs : lhs['$*'](rhs);
-  }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $gvars = Opal.gvars;
 
-  Opal.add_stubs(['$require', '$new', '$allocate', '$initialize', '$to_proc', '$__send__', '$class', '$clone', '$respond_to?', '$==', '$inspect', '$+', '$*', '$map', '$split', '$enum_for', '$each_line', '$to_a', '$%']);
+  Opal.add_stubs(['$require', '$new', '$allocate', '$initialize', '$to_proc', '$__send__', '$class', '$clone', '$respond_to?', '$==', '$inspect', '$+', '$*', '$map', '$split', '$enum_for', '$each_line', '$to_a', '$%', '$-']);
   self.$require("corelib/string");
   (function($base, $super) {
     function $String(){};
     var self = $String = $klass($base, $super, 'String', $String);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1;
 
-    return (Opal.defs(self, '$inherited', function(klass) {
+    return (Opal.defs(self, '$inherited', TMP_1 = function ːinherited(klass) {
       var self = this, replace = nil;
 
       replace = $scope.get('Class').$new((($scope.get('String')).$$scope.get('Wrapper')));
@@ -15336,78 +15560,78 @@ Opal.modules["corelib/string/inheritance"] = function(Opal) {
       klass.$allocate = replace.$allocate;
       klass.$new      = replace.$new;
     
-    }), nil) && 'inherited'
+    }, TMP_1.$$arity = 1), nil) && 'inherited'
   })($scope.base, null);
   return (function($base, $super) {
     function $Wrapper(){};
     var self = $Wrapper = $klass($base, $super, 'Wrapper', $Wrapper);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_6, TMP_8;
+    var def = self.$$proto, $scope = self.$$scope, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_15, TMP_16, TMP_17, TMP_19, TMP_20, TMP_21;
 
     def.literal = nil;
     def.$$is_string = true;
 
-    Opal.defs(self, '$allocate', TMP_1 = function(string) {
-      var self = this, $iter = TMP_1.$$p, $yield = $iter || nil, obj = nil;
+    Opal.defs(self, '$allocate', TMP_2 = function ːallocate(string) {
+      var $a, $b, self = this, $iter = TMP_2.$$p, $yield = $iter || nil, obj = nil;
 
       if (string == null) {
-        string = ""
-      }
-      TMP_1.$$p = null;
-      obj = Opal.find_super_dispatcher(self, 'allocate', TMP_1, null, $Wrapper).apply(self, []);
-      obj.literal = string;
-      return obj;
-    });
-
-    Opal.defs(self, '$new', TMP_2 = function() {
-      var $a, $b, self = this, $iter = TMP_2.$$p, block = $iter || nil, obj = nil, $splat_index = nil;
-
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+        string = "";
       }
       TMP_2.$$p = null;
-      obj = self.$allocate();
-      ($a = ($b = obj).$initialize, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
+      obj = ($a = ($b = self, Opal.find_super_dispatcher(self, 'allocate', TMP_2, false, $Wrapper)), $a.$$p = null, $a).call($b);
+      obj.literal = string;
       return obj;
-    });
+    }, TMP_2.$$arity = -1);
 
-    Opal.defs(self, '$[]', function() {
-      var self = this, $splat_index = nil;
+    Opal.defs(self, '$new', TMP_3 = function($a_rest) {
+      var $b, $c, self = this, args, $iter = TMP_3.$$p, block = $iter || nil, obj = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var objects = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        objects[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
+      }
+      TMP_3.$$p = null;
+      obj = self.$allocate();
+      ($b = ($c = obj).$initialize, $b.$$p = block.$to_proc(), $b).apply($c, Opal.to_a(args));
+      return obj;
+    }, TMP_3.$$arity = -1);
+
+    Opal.defs(self, '$[]', TMP_4 = function($a_rest) {
+      var self = this, objects;
+
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      objects = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        objects[$arg_idx - 0] = arguments[$arg_idx];
       }
       return self.$allocate(objects);
-    });
+    }, TMP_4.$$arity = -1);
 
-    Opal.defn(self, '$initialize', function(string) {
+    Opal.defn(self, '$initialize', TMP_5 = function ːinitialize(string) {
       var self = this;
 
       if (string == null) {
-        string = ""
+        string = "";
       }
       return self.literal = string;
-    });
+    }, TMP_5.$$arity = -1);
 
-    Opal.defn(self, '$method_missing', TMP_3 = function() {
-      var $a, $b, self = this, $iter = TMP_3.$$p, block = $iter || nil, result = nil, $splat_index = nil;
+    Opal.defn(self, '$method_missing', TMP_6 = function ːmethod_missing($a_rest) {
+      var $b, $c, self = this, args, $iter = TMP_6.$$p, block = $iter || nil, result = nil;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      TMP_3.$$p = null;
-      result = ($a = ($b = self.literal).$__send__, $a.$$p = block.$to_proc(), $a).apply($b, Opal.to_a(args));
-      if ((($a = result.$$is_string != null) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = result == self.literal) !== nil && (!$a.$$is_boolean || $a == true))) {
+      TMP_6.$$p = null;
+      result = ($b = ($c = self.literal).$__send__, $b.$$p = block.$to_proc(), $b).apply($c, Opal.to_a(args));
+      if ((($b = result.$$is_string != null) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        if ((($b = result == self.literal) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           return self
           } else {
           return self.$class().$allocate(result)
@@ -15415,56 +15639,57 @@ Opal.modules["corelib/string/inheritance"] = function(Opal) {
         } else {
         return result
       };
-    });
+    }, TMP_6.$$arity = -1);
 
-    Opal.defn(self, '$initialize_copy', function(other) {
+    Opal.defn(self, '$initialize_copy', TMP_7 = function ːinitialize_copy(other) {
       var self = this;
 
       return self.literal = (other.literal).$clone();
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$respond_to?', TMP_4 = function(name) {
-      var $a, self = this, $iter = TMP_4.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil;
+    Opal.defn(self, '$respond_to?', TMP_8 = function(name, $a_rest) {
+      var $b, $c, $d, self = this, $iter = TMP_8.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
 
-      TMP_4.$$p = null;
+      TMP_8.$$p = null;
       $zuper = [];
+      
       for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
         $zuper[$zuper_index] = arguments[$zuper_index];
       }
-      return ((($a = Opal.find_super_dispatcher(self, 'respond_to?', TMP_4, $iter).apply(self, $zuper)) !== false && $a !== nil) ? $a : self.literal['$respond_to?'](name));
-    });
+      return ((($b = ($c = ($d = self, Opal.find_super_dispatcher(self, 'respond_to?', TMP_8, false)), $c.$$p = $iter, $c).apply($d, $zuper)) !== false && $b !== nil && $b != null) ? $b : self.literal['$respond_to?'](name));
+    }, TMP_8.$$arity = -2);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_9 = function(other) {
       var self = this;
 
       return self.literal['$=='](other);
-    });
+    }, TMP_9.$$arity = 1);
 
     Opal.alias(self, 'eql?', '==');
 
     Opal.alias(self, '===', '==');
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_10 = function ːto_s() {
       var self = this;
 
       return self.literal;
-    });
+    }, TMP_10.$$arity = 0);
 
     Opal.alias(self, 'to_str', 'to_s');
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_11 = function ːinspect() {
       var self = this;
 
       return self.literal.$inspect();
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_12 = function(other) {
       var self = this;
 
       return $rb_plus(self.literal, other);
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$*', function(other) {
+    Opal.defn(self, '$*', TMP_13 = function(other) {
       var self = this;
 
       
@@ -15477,70 +15702,80 @@ Opal.modules["corelib/string/inheritance"] = function(Opal) {
         return result;
       }
     ;
-    });
+    }, TMP_13.$$arity = 1);
 
-    Opal.defn(self, '$split', function(pattern, limit) {
-      var $a, $b, TMP_5, self = this;
+    Opal.defn(self, '$split', TMP_15 = function ːsplit(pattern, limit) {
+      var $a, $b, TMP_14, self = this;
 
-      return ($a = ($b = self.literal.$split(pattern, limit)).$map, $a.$$p = (TMP_5 = function(str){var self = TMP_5.$$s || this;
+      return ($a = ($b = self.literal.$split(pattern, limit)).$map, $a.$$p = (TMP_14 = function(str){var self = TMP_14.$$s || this;
 if (str == null) str = nil;
-      return self.$class().$allocate(str)}, TMP_5.$$s = self, TMP_5), $a).call($b);
-    });
+      return self.$class().$allocate(str)}, TMP_14.$$s = self, TMP_14.$$arity = 1, TMP_14), $a).call($b);
+    }, TMP_15.$$arity = -1);
 
-    Opal.defn(self, '$replace', function(string) {
+    Opal.defn(self, '$replace', TMP_16 = function ːreplace(string) {
       var self = this;
 
       return self.literal = string;
-    });
+    }, TMP_16.$$arity = 1);
 
-    Opal.defn(self, '$each_line', TMP_6 = function(separator) {
-      var $a, $b, TMP_7, self = this, $iter = TMP_6.$$p, $yield = $iter || nil;
+    Opal.defn(self, '$each_line', TMP_17 = function ːeach_line(separator) {
+      var $a, $b, TMP_18, self = this, $iter = TMP_17.$$p, $yield = $iter || nil;
       if ($gvars["/"] == null) $gvars["/"] = nil;
 
       if (separator == null) {
-        separator = $gvars["/"]
+        separator = $gvars["/"];
       }
-      TMP_6.$$p = null;
+      TMP_17.$$p = null;
       if (($yield !== nil)) {
         } else {
         return self.$enum_for("each_line", separator)
       };
-      return ($a = ($b = self.literal).$each_line, $a.$$p = (TMP_7 = function(str){var self = TMP_7.$$s || this, $a;
+      return ($a = ($b = self.literal).$each_line, $a.$$p = (TMP_18 = function(str){var self = TMP_18.$$s || this;
 if (str == null) str = nil;
-      return $a = Opal.yield1($yield, self.$class().$allocate(str)), $a === $breaker ? $a : $a}, TMP_7.$$s = self, TMP_7), $a).call($b, separator);
-    });
+      return Opal.yield1($yield, self.$class().$allocate(str));}, TMP_18.$$s = self, TMP_18.$$arity = 1, TMP_18), $a).call($b, separator);
+    }, TMP_17.$$arity = -1);
 
-    Opal.defn(self, '$lines', TMP_8 = function(separator) {
-      var $a, $b, self = this, $iter = TMP_8.$$p, block = $iter || nil, e = nil;
+    Opal.defn(self, '$lines', TMP_19 = function ːlines(separator) {
+      var $a, $b, self = this, $iter = TMP_19.$$p, block = $iter || nil, e = nil;
       if ($gvars["/"] == null) $gvars["/"] = nil;
 
       if (separator == null) {
-        separator = $gvars["/"]
+        separator = $gvars["/"];
       }
-      TMP_8.$$p = null;
+      TMP_19.$$p = null;
       e = ($a = ($b = self).$each_line, $a.$$p = block.$to_proc(), $a).call($b, separator);
-      if (block !== false && block !== nil) {
+      if (block !== false && block !== nil && block != null) {
         return self
         } else {
         return e.$to_a()
       };
-    });
+    }, TMP_19.$$arity = -1);
 
-    return (Opal.defn(self, '$%', function(data) {
+    Opal.defn(self, '$%', TMP_20 = function(data) {
       var self = this;
 
       return self.literal['$%'](data);
-    }), nil) && '%';
+    }, TMP_20.$$arity = 1);
+
+    return (Opal.defn(self, '$instance_variables', TMP_21 = function ːinstance_variables() {
+      var $a, $b, self = this, $iter = TMP_21.$$p, $yield = $iter || nil, $zuper = nil, $zuper_index = nil, $zuper_length = nil;
+
+      TMP_21.$$p = null;
+      $zuper = [];
+      
+      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
+        $zuper[$zuper_index] = arguments[$zuper_index];
+      }
+      return $rb_minus(($a = ($b = self, Opal.find_super_dispatcher(self, 'instance_variables', TMP_21, false)), $a.$$p = $iter, $a).apply($b, $zuper), ["@literal"]);
+    }, TMP_21.$$arity = 0), nil) && 'instance_variables';
   })($scope.get('String'), null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/string/encoding"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_plus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
   }
-  var $a, $b, TMP_4, $c, TMP_6, $d, TMP_8, self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $hash2 = Opal.hash2;
+  var $a, $b, TMP_13, $c, TMP_16, $d, TMP_19, self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $hash2 = Opal.hash2;
 
   Opal.add_stubs(['$require', '$+', '$[]', '$new', '$to_proc', '$each', '$const_set', '$sub', '$upcase', '$const_get', '$===', '$==', '$name', '$include?', '$names', '$constants', '$raise', '$attr_accessor', '$attr_reader', '$register', '$length', '$bytes', '$to_a', '$each_byte', '$bytesize', '$enum_for', '$force_encoding', '$dup', '$coerce_to!', '$find', '$nil?', '$getbyte']);
   self.$require("corelib/string");
@@ -15548,43 +15783,43 @@ Opal.modules["corelib/string/encoding"] = function(Opal) {
     function $Encoding(){};
     var self = $Encoding = $klass($base, $super, 'Encoding', $Encoding);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12;
 
     def.ascii = def.dummy = def.name = nil;
-    Opal.defs(self, '$register', TMP_1 = function(name, options) {
+    Opal.defs(self, '$register', TMP_1 = function ːregister(name, options) {
       var $a, $b, $c, TMP_2, self = this, $iter = TMP_1.$$p, block = $iter || nil, names = nil, encoding = nil;
 
       if (options == null) {
-        options = $hash2([], {})
+        options = $hash2([], {});
       }
       TMP_1.$$p = null;
-      names = $rb_plus([name], (((($a = options['$[]']("aliases")) !== false && $a !== nil) ? $a : [])));
-      encoding = ($a = ($b = $scope.get('Class')).$new, $a.$$p = block.$to_proc(), $a).call($b, self).$new(name, names, ((($a = options['$[]']("ascii")) !== false && $a !== nil) ? $a : false), ((($a = options['$[]']("dummy")) !== false && $a !== nil) ? $a : false));
+      names = $rb_plus([name], (((($a = options['$[]']("aliases")) !== false && $a !== nil && $a != null) ? $a : [])));
+      encoding = ($a = ($b = $scope.get('Class')).$new, $a.$$p = block.$to_proc(), $a).call($b, self).$new(name, names, ((($a = options['$[]']("ascii")) !== false && $a !== nil && $a != null) ? $a : false), ((($a = options['$[]']("dummy")) !== false && $a !== nil && $a != null) ? $a : false));
       return ($a = ($c = names).$each, $a.$$p = (TMP_2 = function(name){var self = TMP_2.$$s || this;
 if (name == null) name = nil;
-      return self.$const_set(name.$sub("-", "_"), encoding)}, TMP_2.$$s = self, TMP_2), $a).call($c);
-    });
+      return self.$const_set(name.$sub("-", "_"), encoding)}, TMP_2.$$s = self, TMP_2.$$arity = 1, TMP_2), $a).call($c);
+    }, TMP_1.$$arity = -2);
 
-    Opal.defs(self, '$find', function(name) {try {
+    Opal.defs(self, '$find', TMP_4 = function ːfind(name) {try {
 
       var $a, $b, TMP_3, self = this, upcase = nil;
 
       upcase = name.$upcase();
-      ($a = ($b = self.$constants()).$each, $a.$$p = (TMP_3 = function(const$){var self = TMP_3.$$s || this, $a, $b, encoding = nil;
+      ($a = ($b = self.$constants()).$each, $a.$$p = (TMP_3 = function(const$){var self = TMP_3.$$s || this, $c, $d, encoding = nil;
 if (const$ == null) const$ = nil;
       encoding = self.$const_get(const$);
-        if ((($a = $scope.get('Encoding')['$==='](encoding)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($c = $scope.get('Encoding')['$==='](encoding)) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
           } else {
           return nil;
         };
-        if ((($a = ((($b = encoding.$name()['$=='](upcase)) !== false && $b !== nil) ? $b : encoding.$names()['$include?'](upcase))) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($c = ((($d = encoding.$name()['$=='](upcase)) !== false && $d !== nil && $d != null) ? $d : encoding.$names()['$include?'](upcase))) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
           Opal.ret(encoding)
           } else {
           return nil
-        };}, TMP_3.$$s = self, TMP_3), $a).call($b);
+        };}, TMP_3.$$s = self, TMP_3.$$arity = 1, TMP_3), $a).call($b);
       return self.$raise($scope.get('ArgumentError'), "unknown encoding name - " + (name));
       } catch ($returner) { if ($returner === Opal.returner) { return $returner.$v } throw $returner; }
-    });
+    }, TMP_4.$$arity = 1);
 
     (function(self) {
       var $scope = self.$$scope, def = self.$$proto;
@@ -15594,60 +15829,60 @@ if (const$ == null) const$ = nil;
 
     self.$attr_reader("name", "names");
 
-    Opal.defn(self, '$initialize', function(name, names, ascii, dummy) {
+    Opal.defn(self, '$initialize', TMP_5 = function ːinitialize(name, names, ascii, dummy) {
       var self = this;
 
       self.name = name;
       self.names = names;
       self.ascii = ascii;
       return self.dummy = dummy;
-    });
+    }, TMP_5.$$arity = 4);
 
-    Opal.defn(self, '$ascii_compatible?', function() {
+    Opal.defn(self, '$ascii_compatible?', TMP_6 = function() {
       var self = this;
 
       return self.ascii;
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$dummy?', function() {
+    Opal.defn(self, '$dummy?', TMP_7 = function() {
       var self = this;
 
       return self.dummy;
-    });
+    }, TMP_7.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_8 = function ːto_s() {
       var self = this;
 
       return self.name;
-    });
+    }, TMP_8.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_9 = function ːinspect() {
       var $a, self = this;
 
-      return "#<Encoding:" + (self.name) + ((function() {if ((($a = self.dummy) !== nil && (!$a.$$is_boolean || $a == true))) {
+      return "#<Encoding:" + (self.name) + ((function() {if ((($a = self.dummy) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return " (dummy)"
         } else {
         return nil
       }; return nil; })()) + ">";
-    });
+    }, TMP_9.$$arity = 0);
 
-    Opal.defn(self, '$each_byte', function() {
+    Opal.defn(self, '$each_byte', TMP_10 = function ːeach_byte($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'));
-    });
+    }, TMP_10.$$arity = -1);
 
-    Opal.defn(self, '$getbyte', function() {
+    Opal.defn(self, '$getbyte', TMP_11 = function ːgetbyte($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'));
-    });
+    }, TMP_11.$$arity = -1);
 
-    Opal.defn(self, '$bytesize', function() {
+    Opal.defn(self, '$bytesize', TMP_12 = function ːbytesize($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'));
-    });
+    }, TMP_12.$$arity = -1);
 
     (function($base, $super) {
       function $EncodingError(){};
@@ -15667,124 +15902,124 @@ if (const$ == null) const$ = nil;
       return nil;
     })($scope.base, $scope.get('EncodingError'));
   })($scope.base, null);
-  ($a = ($b = $scope.get('Encoding')).$register, $a.$$p = (TMP_4 = function(){var self = TMP_4.$$s || this, TMP_5;
+  ($a = ($b = $scope.get('Encoding')).$register, $a.$$p = (TMP_13 = function(){var self = TMP_13.$$s || this, TMP_14, TMP_15;
 
-  Opal.def(self, '$each_byte', TMP_5 = function(string) {
-      var $a, self = this, $iter = TMP_5.$$p, block = $iter || nil;
+  Opal.def(self, '$each_byte', TMP_14 = function ːeach_byte(string) {
+      var self = this, $iter = TMP_14.$$p, block = $iter || nil;
 
-      TMP_5.$$p = null;
+      TMP_14.$$p = null;
       
       for (var i = 0, length = string.length; i < length; i++) {
         var code = string.charCodeAt(i);
 
         if (code <= 0x7f) {
-          ((($a = Opal.yield1(block, code)) === $breaker) ? $breaker.$v : $a);
+          Opal.yield1(block, code);
         }
         else {
           var encoded = encodeURIComponent(string.charAt(i)).substr(1).split('%');
 
           for (var j = 0, encoded_length = encoded.length; j < encoded_length; j++) {
-            ((($a = Opal.yield1(block, parseInt(encoded[j], 16))) === $breaker) ? $breaker.$v : $a);
+            Opal.yield1(block, parseInt(encoded[j], 16));
           }
         }
       }
     
-    });
-    return (Opal.def(self, '$bytesize', function() {
+    }, TMP_14.$$arity = 1);
+    return (Opal.def(self, '$bytesize', TMP_15 = function ːbytesize() {
       var self = this;
 
       return self.$bytes().$length();
-    }), nil) && 'bytesize';}, TMP_4.$$s = self, TMP_4), $a).call($b, "UTF-8", $hash2(["aliases", "ascii"], {"aliases": ["CP65001"], "ascii": true}));
-  ($a = ($c = $scope.get('Encoding')).$register, $a.$$p = (TMP_6 = function(){var self = TMP_6.$$s || this, TMP_7;
+    }, TMP_15.$$arity = 0), nil) && 'bytesize';}, TMP_13.$$s = self, TMP_13.$$arity = 0, TMP_13), $a).call($b, "UTF-8", $hash2(["aliases", "ascii"], {"aliases": ["CP65001"], "ascii": true}));
+  ($a = ($c = $scope.get('Encoding')).$register, $a.$$p = (TMP_16 = function(){var self = TMP_16.$$s || this, TMP_17, TMP_18;
 
-  Opal.def(self, '$each_byte', TMP_7 = function(string) {
-      var $a, self = this, $iter = TMP_7.$$p, block = $iter || nil;
+  Opal.def(self, '$each_byte', TMP_17 = function ːeach_byte(string) {
+      var self = this, $iter = TMP_17.$$p, block = $iter || nil;
 
-      TMP_7.$$p = null;
+      TMP_17.$$p = null;
       
       for (var i = 0, length = string.length; i < length; i++) {
         var code = string.charCodeAt(i);
 
-        ((($a = Opal.yield1(block, code & 0xff)) === $breaker) ? $breaker.$v : $a);
-        ((($a = Opal.yield1(block, code >> 8)) === $breaker) ? $breaker.$v : $a);
+        Opal.yield1(block, code & 0xff);
+        Opal.yield1(block, code >> 8);
       }
     
-    });
-    return (Opal.def(self, '$bytesize', function() {
+    }, TMP_17.$$arity = 1);
+    return (Opal.def(self, '$bytesize', TMP_18 = function ːbytesize() {
       var self = this;
 
       return self.$bytes().$length();
-    }), nil) && 'bytesize';}, TMP_6.$$s = self, TMP_6), $a).call($c, "UTF-16LE");
-  ($a = ($d = $scope.get('Encoding')).$register, $a.$$p = (TMP_8 = function(){var self = TMP_8.$$s || this, TMP_9;
+    }, TMP_18.$$arity = 0), nil) && 'bytesize';}, TMP_16.$$s = self, TMP_16.$$arity = 0, TMP_16), $a).call($c, "UTF-16LE");
+  ($a = ($d = $scope.get('Encoding')).$register, $a.$$p = (TMP_19 = function(){var self = TMP_19.$$s || this, TMP_20, TMP_21;
 
-  Opal.def(self, '$each_byte', TMP_9 = function(string) {
-      var $a, self = this, $iter = TMP_9.$$p, block = $iter || nil;
+  Opal.def(self, '$each_byte', TMP_20 = function ːeach_byte(string) {
+      var self = this, $iter = TMP_20.$$p, block = $iter || nil;
 
-      TMP_9.$$p = null;
+      TMP_20.$$p = null;
       
       for (var i = 0, length = string.length; i < length; i++) {
-        ((($a = Opal.yield1(block, string.charCodeAt(i) & 0xff)) === $breaker) ? $breaker.$v : $a);
+        Opal.yield1(block, string.charCodeAt(i) & 0xff);
       }
     
-    });
-    return (Opal.def(self, '$bytesize', function() {
+    }, TMP_20.$$arity = 1);
+    return (Opal.def(self, '$bytesize', TMP_21 = function ːbytesize() {
       var self = this;
 
       return self.$bytes().$length();
-    }), nil) && 'bytesize';}, TMP_8.$$s = self, TMP_8), $a).call($d, "ASCII-8BIT", $hash2(["aliases", "ascii"], {"aliases": ["BINARY"], "ascii": true}));
+    }, TMP_21.$$arity = 0), nil) && 'bytesize';}, TMP_19.$$s = self, TMP_19.$$arity = 0, TMP_19), $a).call($d, "ASCII-8BIT", $hash2(["aliases", "ascii"], {"aliases": ["BINARY"], "ascii": true}));
   return (function($base, $super) {
     function $String(){};
     var self = $String = $klass($base, $super, 'String', $String);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_10;
+    var def = self.$$proto, $scope = self.$$scope, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28;
 
     def.encoding = nil;
     String.prototype.encoding = (($scope.get('Encoding')).$$scope.get('UTF_16LE'));
 
-    Opal.defn(self, '$bytes', function() {
+    Opal.defn(self, '$bytes', TMP_22 = function ːbytes() {
       var self = this;
 
       return self.$each_byte().$to_a();
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$bytesize', function() {
+    Opal.defn(self, '$bytesize', TMP_23 = function ːbytesize() {
       var self = this;
 
       return self.encoding.$bytesize(self);
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$each_byte', TMP_10 = function() {
-      var $a, $b, self = this, $iter = TMP_10.$$p, block = $iter || nil;
+    Opal.defn(self, '$each_byte', TMP_24 = function ːeach_byte() {
+      var $a, $b, self = this, $iter = TMP_24.$$p, block = $iter || nil;
 
-      TMP_10.$$p = null;
+      TMP_24.$$p = null;
       if ((block !== nil)) {
         } else {
         return self.$enum_for("each_byte")
       };
       ($a = ($b = self.encoding).$each_byte, $a.$$p = block.$to_proc(), $a).call($b, self);
       return self;
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$encode', function(encoding) {
+    Opal.defn(self, '$encode', TMP_25 = function ːencode(encoding) {
       var self = this;
 
       return self.$dup().$force_encoding(encoding);
-    });
+    }, TMP_25.$$arity = 1);
 
-    Opal.defn(self, '$encoding', function() {
+    Opal.defn(self, '$encoding', TMP_26 = function ːencoding() {
       var self = this;
 
       return self.encoding;
-    });
+    }, TMP_26.$$arity = 0);
 
-    Opal.defn(self, '$force_encoding', function(encoding) {
+    Opal.defn(self, '$force_encoding', TMP_27 = function ːforce_encoding(encoding) {
       var $a, self = this;
 
       encoding = $scope.get('Opal')['$coerce_to!'](encoding, $scope.get('String'), "to_str");
       encoding = $scope.get('Encoding').$find(encoding);
       if (encoding['$=='](self.encoding)) {
         return self};
-      if ((($a = encoding['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = encoding['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('ArgumentError'), "unknown encoding name - " + (encoding))};
       
       var result = new String(self);
@@ -15792,19 +16027,17 @@ if (const$ == null) const$ = nil;
 
       return result;
     
-    });
+    }, TMP_27.$$arity = 1);
 
-    return (Opal.defn(self, '$getbyte', function(idx) {
+    return (Opal.defn(self, '$getbyte', TMP_28 = function ːgetbyte(idx) {
       var self = this;
 
       return self.encoding.$getbyte(self, idx);
-    }), nil) && 'getbyte';
+    }, TMP_28.$$arity = 1), nil) && 'getbyte';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/math"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_minus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs - rhs : lhs['$-'](rhs);
   }
@@ -15817,7 +16050,7 @@ Opal.modules["corelib/math"] = function(Opal) {
   return (function($base) {
     var $Math, self = $Math = $module($base, 'Math');
 
-    var def = self.$$proto, $scope = self.$$scope, $a;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, $a, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29;
 
     Opal.cdecl($scope, 'E', Math.E);
 
@@ -15825,14 +16058,14 @@ Opal.modules["corelib/math"] = function(Opal) {
 
     Opal.cdecl($scope, 'DomainError', $scope.get('Class').$new($scope.get('StandardError')));
 
-    Opal.defs(self, '$checked', function(method) {
-      var self = this, $splat_index = nil;
+    Opal.defs(self, '$checked', TMP_1 = function ːchecked(method, $a_rest) {
+      var self = this, args;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
       
       if (isNaN(args[0]) || (args.length == 2 && isNaN(args[1]))) {
@@ -15847,47 +16080,45 @@ Opal.modules["corelib/math"] = function(Opal) {
 
       return result;
     
-    });
+    }, TMP_1.$$arity = -2);
 
-    Opal.defs(self, '$float!', function(value) {
+    Opal.defs(self, '$float!', TMP_2 = function(value) {
       var self = this;
 
       try {
-      return self.$Float(value)
-      } catch ($err) {if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
-        try {
-          return self.$raise($scope.get('Opal').$type_error(value, $scope.get('Float')))
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
+        return self.$Float(value)
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
+          try {
+            return self.$raise($scope.get('Opal').$type_error(value, $scope.get('Float')))
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
       };
-    });
+    }, TMP_2.$$arity = 1);
 
-    Opal.defs(self, '$integer!', function(value) {
+    Opal.defs(self, '$integer!', TMP_3 = function(value) {
       var self = this;
 
       try {
-      return self.$Integer(value)
-      } catch ($err) {if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
-        try {
-          return self.$raise($scope.get('Opal').$type_error(value, $scope.get('Integer')))
-        } finally {
-          Opal.gvars["!"] = Opal.exceptions.pop() || Opal.nil;
-        }
-        }else { throw $err; }
+        return self.$Integer(value)
+      } catch ($err) {
+        if (Opal.rescue($err, [$scope.get('ArgumentError')])) {
+          try {
+            return self.$raise($scope.get('Opal').$type_error(value, $scope.get('Integer')))
+          } finally { Opal.pop_exception() }
+        } else { throw $err; }
       };
-    });
+    }, TMP_3.$$arity = 1);
 
     self.$module_function();
 
-    Opal.defn(self, '$acos', function(x) {
+    Opal.defn(self, '$acos', TMP_4 = function ːacos(x) {
       var self = this;
 
       return $scope.get('Math').$checked("acos", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_4.$$arity = 1);
 
-    if ((($a = (typeof(Math.acosh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.acosh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.acosh = function(x) {
@@ -15896,19 +16127,19 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$acosh', function(x) {
+    Opal.defn(self, '$acosh', TMP_5 = function ːacosh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("acosh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$asin', function(x) {
+    Opal.defn(self, '$asin', TMP_6 = function ːasin(x) {
       var self = this;
 
       return $scope.get('Math').$checked("asin", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_6.$$arity = 1);
 
-    if ((($a = (typeof(Math.asinh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.asinh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.asinh = function(x) {
@@ -15917,25 +16148,25 @@ Opal.modules["corelib/math"] = function(Opal) {
     ;
     };
 
-    Opal.defn(self, '$asinh', function(x) {
+    Opal.defn(self, '$asinh', TMP_7 = function ːasinh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("asinh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$atan', function(x) {
+    Opal.defn(self, '$atan', TMP_8 = function ːatan(x) {
       var self = this;
 
       return $scope.get('Math').$checked("atan", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$atan2', function(y, x) {
+    Opal.defn(self, '$atan2', TMP_9 = function ːatan2(y, x) {
       var self = this;
 
       return $scope.get('Math').$checked("atan2", $scope.get('Math')['$float!'](y), $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_9.$$arity = 2);
 
-    if ((($a = (typeof(Math.atanh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.atanh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.atanh = function(x) {
@@ -15944,13 +16175,13 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$atanh', function(x) {
+    Opal.defn(self, '$atanh', TMP_10 = function ːatanh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("atanh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_10.$$arity = 1);
 
-    if ((($a = (typeof(Math.cbrt) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.cbrt) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.cbrt = function(x) {
@@ -15997,19 +16228,19 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$cbrt', function(x) {
+    Opal.defn(self, '$cbrt', TMP_11 = function ːcbrt(x) {
       var self = this;
 
       return $scope.get('Math').$checked("cbrt", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$cos', function(x) {
+    Opal.defn(self, '$cos', TMP_12 = function ːcos(x) {
       var self = this;
 
       return $scope.get('Math').$checked("cos", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_12.$$arity = 1);
 
-    if ((($a = (typeof(Math.cosh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.cosh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.cosh = function(x) {
@@ -16018,13 +16249,13 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$cosh', function(x) {
+    Opal.defn(self, '$cosh', TMP_13 = function ːcosh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("cosh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_13.$$arity = 1);
 
-    if ((($a = (typeof(Math.erf) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.erf) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.erf = function(x) {
@@ -16051,13 +16282,13 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$erf', function(x) {
+    Opal.defn(self, '$erf', TMP_14 = function ːerf(x) {
       var self = this;
 
       return $scope.get('Math').$checked("erf", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_14.$$arity = 1);
 
-    if ((($a = (typeof(Math.erfc) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.erfc) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.erfc = function(x) {
@@ -16087,19 +16318,19 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$erfc', function(x) {
+    Opal.defn(self, '$erfc', TMP_15 = function ːerfc(x) {
       var self = this;
 
       return $scope.get('Math').$checked("erfc", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$exp', function(x) {
+    Opal.defn(self, '$exp', TMP_16 = function ːexp(x) {
       var self = this;
 
       return $scope.get('Math').$checked("exp", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_16.$$arity = 1);
 
-    Opal.defn(self, '$frexp', function(x) {
+    Opal.defn(self, '$frexp', TMP_17 = function ːfrexp(x) {
       var self = this;
 
       x = $scope.get('Math')['$float!'](x);
@@ -16113,9 +16344,9 @@ Opal.modules["corelib/math"] = function(Opal) {
 
       return [frac, ex];
     
-    });
+    }, TMP_17.$$arity = 1);
 
-    Opal.defn(self, '$gamma', function(n) {
+    Opal.defn(self, '$gamma', TMP_18 = function ːgamma(n) {
       var self = this;
 
       n = $scope.get('Math')['$float!'](n);
@@ -16210,9 +16441,9 @@ Opal.modules["corelib/math"] = function(Opal) {
 
       return Math.sqrt(2 * Math.PI) * Math.pow(t, n + 0.5) * Math.exp(-t) * x;
     
-    });
+    }, TMP_18.$$arity = 1);
 
-    if ((($a = (typeof(Math.hypot) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.hypot) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.hypot = function(x, y) {
@@ -16221,13 +16452,13 @@ Opal.modules["corelib/math"] = function(Opal) {
     ;
     };
 
-    Opal.defn(self, '$hypot', function(x, y) {
+    Opal.defn(self, '$hypot', TMP_19 = function ːhypot(x, y) {
       var self = this;
 
       return $scope.get('Math').$checked("hypot", $scope.get('Math')['$float!'](x), $scope.get('Math')['$float!'](y));
-    });
+    }, TMP_19.$$arity = 2);
 
-    Opal.defn(self, '$ldexp', function(mantissa, exponent) {
+    Opal.defn(self, '$ldexp', TMP_20 = function ːldexp(mantissa, exponent) {
       var self = this;
 
       mantissa = $scope.get('Math')['$float!'](mantissa);
@@ -16239,9 +16470,9 @@ Opal.modules["corelib/math"] = function(Opal) {
 
       return mantissa * Math.pow(2, exponent);
     ;
-    });
+    }, TMP_20.$$arity = 2);
 
-    Opal.defn(self, '$lgamma', function(n) {
+    Opal.defn(self, '$lgamma', TMP_21 = function ːlgamma(n) {
       var self = this;
 
       
@@ -16252,23 +16483,23 @@ Opal.modules["corelib/math"] = function(Opal) {
         return [Math.log(Math.abs($scope.get('Math').$gamma(n))), $scope.get('Math').$gamma(n) < 0 ? -1 : 1];
       }
     ;
-    });
+    }, TMP_21.$$arity = 1);
 
-    Opal.defn(self, '$log', function(x, base) {
+    Opal.defn(self, '$log', TMP_22 = function ːlog(x, base) {
       var $a, self = this;
 
-      if ((($a = $scope.get('String')['$==='](x)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('String')['$==='](x)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('Opal').$type_error(x, $scope.get('Float')))};
-      if ((($a = base == null) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = base == null) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Math').$checked("log", $scope.get('Math')['$float!'](x))
         } else {
-        if ((($a = $scope.get('String')['$==='](base)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $scope.get('String')['$==='](base)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           self.$raise($scope.get('Opal').$type_error(base, $scope.get('Float')))};
         return $rb_divide($scope.get('Math').$checked("log", $scope.get('Math')['$float!'](x)), $scope.get('Math').$checked("log", $scope.get('Math')['$float!'](base)));
       };
-    });
+    }, TMP_22.$$arity = -2);
 
-    if ((($a = (typeof(Math.log10) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.log10) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.log10 = function(x) {
@@ -16277,15 +16508,15 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$log10', function(x) {
+    Opal.defn(self, '$log10', TMP_23 = function ːlog10(x) {
       var $a, self = this;
 
-      if ((($a = $scope.get('String')['$==='](x)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('String')['$==='](x)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('Opal').$type_error(x, $scope.get('Float')))};
       return $scope.get('Math').$checked("log10", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_23.$$arity = 1);
 
-    if ((($a = (typeof(Math.log2) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.log2) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.log2 = function(x) {
@@ -16294,21 +16525,21 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$log2', function(x) {
+    Opal.defn(self, '$log2', TMP_24 = function ːlog2(x) {
       var $a, self = this;
 
-      if ((($a = $scope.get('String')['$==='](x)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('String')['$==='](x)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('Opal').$type_error(x, $scope.get('Float')))};
       return $scope.get('Math').$checked("log2", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_24.$$arity = 1);
 
-    Opal.defn(self, '$sin', function(x) {
+    Opal.defn(self, '$sin', TMP_25 = function ːsin(x) {
       var self = this;
 
       return $scope.get('Math').$checked("sin", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_25.$$arity = 1);
 
-    if ((($a = (typeof(Math.sinh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.sinh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.sinh = function(x) {
@@ -16317,28 +16548,28 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$sinh', function(x) {
+    Opal.defn(self, '$sinh', TMP_26 = function ːsinh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("sinh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_26.$$arity = 1);
 
-    Opal.defn(self, '$sqrt', function(x) {
+    Opal.defn(self, '$sqrt', TMP_27 = function ːsqrt(x) {
       var self = this;
 
       return $scope.get('Math').$checked("sqrt", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_27.$$arity = 1);
 
-    Opal.defn(self, '$tan', function(x) {
+    Opal.defn(self, '$tan', TMP_28 = function ːtan(x) {
       var $a, self = this;
 
       x = $scope.get('Math')['$float!'](x);
-      if ((($a = x['$infinite?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = x['$infinite?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return (($scope.get('Float')).$$scope.get('NAN'))};
       return $scope.get('Math').$checked("tan", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_28.$$arity = 1);
 
-    if ((($a = (typeof(Math.tanh) !== "undefined")) !== nil && (!$a.$$is_boolean || $a == true))) {
+    if ((($a = (typeof(Math.tanh) !== "undefined")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
       } else {
       
       Math.tanh = function(x) {
@@ -16355,17 +16586,15 @@ Opal.modules["corelib/math"] = function(Opal) {
     
     };
 
-    Opal.defn(self, '$tanh', function(x) {
+    Opal.defn(self, '$tanh', TMP_29 = function ːtanh(x) {
       var self = this;
 
       return $scope.get('Math').$checked("tanh", $scope.get('Math')['$float!'](x));
-    });
+    }, TMP_29.$$arity = 1);
   })($scope.base)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/complex"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_times(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs * rhs : lhs['$*'](rhs);
   }
@@ -16389,21 +16618,21 @@ Opal.modules["corelib/complex"] = function(Opal) {
     function $Complex(){};
     var self = $Complex = $klass($base, $super, 'Complex', $Complex);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29;
 
     def.real = def.imag = nil;
-    Opal.defs(self, '$rect', function(real, imag) {
+    Opal.defs(self, '$rect', TMP_1 = function ːrect(real, imag) {
       var $a, $b, $c, $d, self = this;
 
       if (imag == null) {
-        imag = 0
+        imag = 0;
       }
-      if ((($a = ($b = ($c = ($d = $scope.get('Numeric')['$==='](real), $d !== false && $d !== nil ?real['$real?']() : $d), $c !== false && $c !== nil ?$scope.get('Numeric')['$==='](imag) : $c), $b !== false && $b !== nil ?imag['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = ($c = ($d = $scope.get('Numeric')['$==='](real), $d !== false && $d !== nil && $d != null ?real['$real?']() : $d), $c !== false && $c !== nil && $c != null ?$scope.get('Numeric')['$==='](imag) : $c), $b !== false && $b !== nil && $b != null ?imag['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "not a real")
       };
       return self.$new(real, imag);
-    });
+    }, TMP_1.$$arity = -2);
 
     (function(self) {
       var $scope = self.$$scope, def = self.$$proto;
@@ -16411,132 +16640,132 @@ Opal.modules["corelib/complex"] = function(Opal) {
       return Opal.alias(self, 'rectangular', 'rect')
     })(Opal.get_singleton_class(self));
 
-    Opal.defs(self, '$polar', function(r, theta) {
+    Opal.defs(self, '$polar', TMP_2 = function ːpolar(r, theta) {
       var $a, $b, $c, $d, self = this;
 
       if (theta == null) {
-        theta = 0
+        theta = 0;
       }
-      if ((($a = ($b = ($c = ($d = $scope.get('Numeric')['$==='](r), $d !== false && $d !== nil ?r['$real?']() : $d), $c !== false && $c !== nil ?$scope.get('Numeric')['$==='](theta) : $c), $b !== false && $b !== nil ?theta['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = ($c = ($d = $scope.get('Numeric')['$==='](r), $d !== false && $d !== nil && $d != null ?r['$real?']() : $d), $c !== false && $c !== nil && $c != null ?$scope.get('Numeric')['$==='](theta) : $c), $b !== false && $b !== nil && $b != null ?theta['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "not a real")
       };
       return self.$new($rb_times(r, $scope.get('Math').$cos(theta)), $rb_times(r, $scope.get('Math').$sin(theta)));
-    });
+    }, TMP_2.$$arity = -2);
 
     self.$attr_reader("real", "imag");
 
-    Opal.defn(self, '$initialize', function(real, imag) {
+    Opal.defn(self, '$initialize', TMP_3 = function ːinitialize(real, imag) {
       var self = this;
 
       if (imag == null) {
-        imag = 0
+        imag = 0;
       }
       self.real = real;
       return self.imag = imag;
-    });
+    }, TMP_3.$$arity = -2);
 
-    Opal.defn(self, '$coerce', function(other) {
+    Opal.defn(self, '$coerce', TMP_4 = function ːcoerce(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return [other, self]
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return [$scope.get('Complex').$new(other, 0), self]
         } else {
         return self.$raise($scope.get('TypeError'), "" + (other.$class()) + " can't be coerced into Complex")
       };
-    });
+    }, TMP_4.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_5 = function(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return (($a = self.real['$=='](other.$real())) ? self.imag['$=='](other.$imag()) : self.real['$=='](other.$real()))
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return (($a = self.real['$=='](other)) ? self.imag['$=='](0) : self.real['$=='](other))
         } else {
         return other['$=='](self)
       };
-    });
+    }, TMP_5.$$arity = 1);
 
-    Opal.defn(self, '$-@', function() {
+    Opal.defn(self, '$-@', TMP_6 = function() {
       var self = this;
 
       return self.$Complex(self.real['$-@'](), self.imag['$-@']());
-    });
+    }, TMP_6.$$arity = 0);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_7 = function(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_plus(self.real, other.$real()), $rb_plus(self.imag, other.$imag()))
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_plus(self.real, other), self.imag)
         } else {
         return self.$__coerced__("+", other)
       };
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$-', function(other) {
+    Opal.defn(self, '$-', TMP_8 = function(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_minus(self.real, other.$real()), $rb_minus(self.imag, other.$imag()))
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_minus(self.real, other), self.imag)
         } else {
         return self.$__coerced__("-", other)
       };
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$*', function(other) {
+    Opal.defn(self, '$*', TMP_9 = function(other) {
       var $a, $b, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_minus($rb_times(self.real, other.$real()), $rb_times(self.imag, other.$imag())), $rb_plus($rb_times(self.real, other.$imag()), $rb_times(self.imag, other.$real())))
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex($rb_times(self.real, other), $rb_times(self.imag, other))
         } else {
         return self.$__coerced__("*", other)
       };
-    });
+    }, TMP_9.$$arity = 1);
 
-    Opal.defn(self, '$/', function(other) {
+    Opal.defn(self, '$/', TMP_10 = function(other) {
       var $a, $b, $c, $d, $e, self = this;
 
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = ((($b = ((($c = ((($d = (($e = $scope.get('Number')['$==='](self.real), $e !== false && $e !== nil ?self.real['$nan?']() : $e))) !== false && $d !== nil) ? $d : (($e = $scope.get('Number')['$==='](self.imag), $e !== false && $e !== nil ?self.imag['$nan?']() : $e)))) !== false && $c !== nil) ? $c : (($d = $scope.get('Number')['$==='](other.$real()), $d !== false && $d !== nil ?other.$real()['$nan?']() : $d)))) !== false && $b !== nil) ? $b : (($c = $scope.get('Number')['$==='](other.$imag()), $c !== false && $c !== nil ?other.$imag()['$nan?']() : $c)))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ((($b = ((($c = ((($d = (($e = $scope.get('Number')['$==='](self.real), $e !== false && $e !== nil && $e != null ?self.real['$nan?']() : $e))) !== false && $d !== nil && $d != null) ? $d : (($e = $scope.get('Number')['$==='](self.imag), $e !== false && $e !== nil && $e != null ?self.imag['$nan?']() : $e)))) !== false && $c !== nil && $c != null) ? $c : (($d = $scope.get('Number')['$==='](other.$real()), $d !== false && $d !== nil && $d != null ?other.$real()['$nan?']() : $d)))) !== false && $b !== nil && $b != null) ? $b : (($c = $scope.get('Number')['$==='](other.$imag()), $c !== false && $c !== nil && $c != null ?other.$imag()['$nan?']() : $c)))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return $scope.get('Complex').$new((($scope.get('Float')).$$scope.get('NAN')), (($scope.get('Float')).$$scope.get('NAN')))
           } else {
           return $rb_divide($rb_times(self, other.$conj()), other.$abs2())
         }
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil ?other['$real?']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](other), $b !== false && $b !== nil && $b != null ?other['$real?']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Complex(self.real.$quo(other), self.imag.$quo(other))
         } else {
         return self.$__coerced__("/", other)
       };
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defn(self, '$**', function(other) {
+    Opal.defn(self, '$**', TMP_11 = function(other) {
       var $a, $b, $c, $d, $e, self = this, r = nil, theta = nil, ore = nil, oim = nil, nr = nil, ntheta = nil, x = nil, z = nil, n = nil, div = nil, mod = nil;
 
       if (other['$=='](0)) {
         return $scope.get('Complex').$new(1, 0)};
-      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Complex')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         $b = self.$polar(), $a = Opal.to_ary($b), r = ($a[0] == null ? nil : $a[0]), theta = ($a[1] == null ? nil : $a[1]), $b;
         ore = other.$real();
         oim = other.$imag();
         nr = $scope.get('Math').$exp($rb_minus($rb_times(ore, $scope.get('Math').$log(r)), $rb_times(oim, theta)));
         ntheta = $rb_plus($rb_times(theta, ore), $rb_times(oim, $scope.get('Math').$log(r)));
         return $scope.get('Complex').$polar(nr, ntheta);
-      } else if ((($a = $scope.get('Integer')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = $rb_gt(other, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = $scope.get('Integer')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_gt(other, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           x = self;
           z = x;
           n = $rb_minus(other, 1);
-          while ((($b = n['$!='](0)) !== nil && (!$b.$$is_boolean || $b == true))) {
-          while ((($c = ($e = n.$divmod(2), $d = Opal.to_ary($e), div = ($d[0] == null ? nil : $d[0]), mod = ($d[1] == null ? nil : $d[1]), $e, mod['$=='](0))) !== nil && (!$c.$$is_boolean || $c == true))) {
+          while ((($b = n['$!='](0)) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+          while ((($c = ($e = n.$divmod(2), $d = Opal.to_ary($e), div = ($d[0] == null ? nil : $d[0]), mod = ($d[1] == null ? nil : $d[1]), $e, mod['$=='](0))) !== nil && $c != null && (!$c.$$is_boolean || $c == true))) {
           x = self.$Complex($rb_minus($rb_times(x.$real(), x.$real()), $rb_times(x.$imag(), x.$imag())), $rb_times($rb_times(2, x.$real()), x.$imag()));
           n = div;};
           z = $rb_times(z, x);
@@ -16545,100 +16774,100 @@ Opal.modules["corelib/complex"] = function(Opal) {
           } else {
           return ($rb_divide($scope.get('Rational').$new(1, 1), self))['$**'](other['$-@']())
         }
-      } else if ((($a = ((($b = $scope.get('Float')['$==='](other)) !== false && $b !== nil) ? $b : $scope.get('Rational')['$==='](other))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ((($b = $scope.get('Float')['$==='](other)) !== false && $b !== nil && $b != null) ? $b : $scope.get('Rational')['$==='](other))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         $b = self.$polar(), $a = Opal.to_ary($b), r = ($a[0] == null ? nil : $a[0]), theta = ($a[1] == null ? nil : $a[1]), $b;
         return $scope.get('Complex').$polar(r['$**'](other), $rb_times(theta, other));
         } else {
         return self.$__coerced__("**", other)
       };
-    });
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$abs', function() {
+    Opal.defn(self, '$abs', TMP_12 = function ːabs() {
       var self = this;
 
       return $scope.get('Math').$hypot(self.real, self.imag);
-    });
+    }, TMP_12.$$arity = 0);
 
-    Opal.defn(self, '$abs2', function() {
+    Opal.defn(self, '$abs2', TMP_13 = function ːabs2() {
       var self = this;
 
       return $rb_plus($rb_times(self.real, self.real), $rb_times(self.imag, self.imag));
-    });
+    }, TMP_13.$$arity = 0);
 
-    Opal.defn(self, '$angle', function() {
+    Opal.defn(self, '$angle', TMP_14 = function ːangle() {
       var self = this;
 
       return $scope.get('Math').$atan2(self.imag, self.real);
-    });
+    }, TMP_14.$$arity = 0);
 
     Opal.alias(self, 'arg', 'angle');
 
-    Opal.defn(self, '$conj', function() {
+    Opal.defn(self, '$conj', TMP_15 = function ːconj() {
       var self = this;
 
       return self.$Complex(self.real, self.imag['$-@']());
-    });
+    }, TMP_15.$$arity = 0);
 
     Opal.alias(self, 'conjugate', 'conj');
 
-    Opal.defn(self, '$denominator', function() {
+    Opal.defn(self, '$denominator', TMP_16 = function ːdenominator() {
       var self = this;
 
       return self.real.$denominator().$lcm(self.imag.$denominator());
-    });
+    }, TMP_16.$$arity = 0);
 
     Opal.alias(self, 'divide', '/');
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_17 = function(other) {
       var $a, $b, self = this;
 
-      return ($a = ($b = $scope.get('Complex')['$==='](other), $b !== false && $b !== nil ?self.real.$class()['$=='](self.imag.$class()) : $b), $a !== false && $a !== nil ?self['$=='](other) : $a);
-    });
+      return ($a = ($b = $scope.get('Complex')['$==='](other), $b !== false && $b !== nil && $b != null ?self.real.$class()['$=='](self.imag.$class()) : $b), $a !== false && $a !== nil && $a != null ?self['$=='](other) : $a);
+    }, TMP_17.$$arity = 1);
 
-    Opal.defn(self, '$fdiv', function(other) {
+    Opal.defn(self, '$fdiv', TMP_18 = function ːfdiv(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Numeric')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Numeric')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "" + (other.$class()) + " can't be coerced into Complex")
       };
       return $rb_divide(self, other);
-    });
+    }, TMP_18.$$arity = 1);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_19 = function ːhash() {
       var self = this;
 
       return "Complex:" + (self.real) + ":" + (self.imag);
-    });
+    }, TMP_19.$$arity = 0);
 
     Opal.alias(self, 'imaginary', 'imag');
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_20 = function ːinspect() {
       var self = this;
 
       return "(" + (self.$to_s()) + ")";
-    });
+    }, TMP_20.$$arity = 0);
 
     Opal.alias(self, 'magnitude', 'abs');
 
-    Opal.defn(self, '$numerator', function() {
+    Opal.defn(self, '$numerator', TMP_21 = function ːnumerator() {
       var self = this, d = nil;
 
       d = self.$denominator();
       return self.$Complex($rb_times(self.real.$numerator(), ($rb_divide(d, self.real.$denominator()))), $rb_times(self.imag.$numerator(), ($rb_divide(d, self.imag.$denominator()))));
-    });
+    }, TMP_21.$$arity = 0);
 
     Opal.alias(self, 'phase', 'arg');
 
-    Opal.defn(self, '$polar', function() {
+    Opal.defn(self, '$polar', TMP_22 = function ːpolar() {
       var self = this;
 
       return [self.$abs(), self.$arg()];
-    });
+    }, TMP_22.$$arity = 0);
 
     Opal.alias(self, 'quo', '/');
 
-    Opal.defn(self, '$rationalize', function(eps) {
+    Opal.defn(self, '$rationalize', TMP_23 = function ːrationalize(eps) {
       var $a, self = this;
 
       
@@ -16646,26 +16875,26 @@ Opal.modules["corelib/complex"] = function(Opal) {
         self.$raise($scope.get('ArgumentError'), "wrong number of arguments (" + (arguments.length) + " for 0..1)");
       }
     ;
-      if ((($a = self.imag['$!='](0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self.imag['$!='](0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('RangeError'), "can't' convert " + (self) + " into Rational")};
       return self.$real().$rationalize(eps);
-    });
+    }, TMP_23.$$arity = -1);
 
-    Opal.defn(self, '$real?', function() {
+    Opal.defn(self, '$real?', TMP_24 = function() {
       var self = this;
 
       return false;
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$rect', function() {
+    Opal.defn(self, '$rect', TMP_25 = function ːrect() {
       var self = this;
 
       return [self.real, self.imag];
-    });
+    }, TMP_25.$$arity = 0);
 
     Opal.alias(self, 'rectangular', 'rect');
 
-    Opal.defn(self, '$to_f', function() {
+    Opal.defn(self, '$to_f', TMP_26 = function ːto_f() {
       var self = this;
 
       if (self.imag['$=='](0)) {
@@ -16673,9 +16902,9 @@ Opal.modules["corelib/complex"] = function(Opal) {
         self.$raise($scope.get('RangeError'), "can't convert " + (self) + " into Float")
       };
       return self.real.$to_f();
-    });
+    }, TMP_26.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function() {
+    Opal.defn(self, '$to_i', TMP_27 = function ːto_i() {
       var self = this;
 
       if (self.imag['$=='](0)) {
@@ -16683,9 +16912,9 @@ Opal.modules["corelib/complex"] = function(Opal) {
         self.$raise($scope.get('RangeError'), "can't convert " + (self) + " into Integer")
       };
       return self.real.$to_i();
-    });
+    }, TMP_27.$$arity = 0);
 
-    Opal.defn(self, '$to_r', function() {
+    Opal.defn(self, '$to_r', TMP_28 = function ːto_r() {
       var self = this;
 
       if (self.imag['$=='](0)) {
@@ -16693,48 +16922,46 @@ Opal.modules["corelib/complex"] = function(Opal) {
         self.$raise($scope.get('RangeError'), "can't convert " + (self) + " into Rational")
       };
       return self.real.$to_r();
-    });
+    }, TMP_28.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_29 = function ːto_s() {
       var $a, $b, $c, self = this, result = nil;
 
       result = self.real.$inspect();
-      if ((($a = ((($b = (($c = $scope.get('Number')['$==='](self.imag), $c !== false && $c !== nil ?self.imag['$nan?']() : $c))) !== false && $b !== nil) ? $b : self.imag['$positive?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = (($c = $scope.get('Number')['$==='](self.imag), $c !== false && $c !== nil && $c != null ?self.imag['$nan?']() : $c))) !== false && $b !== nil && $b != null) ? $b : self.imag['$positive?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         result = $rb_plus(result, "+")
         } else {
         result = $rb_plus(result, "-")
       };
       result = $rb_plus(result, self.imag.$abs().$inspect());
-      if ((($a = ($b = $scope.get('Number')['$==='](self.imag), $b !== false && $b !== nil ?(((($c = self.imag['$nan?']()) !== false && $c !== nil) ? $c : self.imag['$infinite?']())) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = $scope.get('Number')['$==='](self.imag), $b !== false && $b !== nil && $b != null ?(((($c = self.imag['$nan?']()) !== false && $c !== nil && $c != null) ? $c : self.imag['$infinite?']())) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         result = $rb_plus(result, "*")};
       return $rb_plus(result, "i");
-    });
+    }, TMP_29.$$arity = 0);
 
     return Opal.cdecl($scope, 'I', self.$new(0, 1));
   })($scope.base, $scope.get('Numeric'));
   return (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_30;
 
-    Opal.defn(self, '$Complex', function(real, imag) {
+    Opal.defn(self, '$Complex', TMP_30 = function ːComplex(real, imag) {
       var self = this;
 
       if (imag == null) {
-        imag = nil
+        imag = nil;
       }
-      if (imag !== false && imag !== nil) {
+      if (imag !== false && imag !== nil && imag != null) {
         return $scope.get('Complex').$new(real, imag)
         } else {
         return $scope.get('Complex').$new(real, 0)
       };
-    })
+    }, TMP_30.$$arity = -2)
   })($scope.base);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/rational"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_lt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs < rhs : lhs['$<'](rhs);
   }
@@ -16764,109 +16991,109 @@ Opal.modules["corelib/rational"] = function(Opal) {
     function $Rational(){};
     var self = $Rational = $klass($base, $super, 'Rational', $Rational);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26;
 
     def.num = def.den = nil;
-    Opal.defs(self, '$reduce', function(num, den) {
+    Opal.defs(self, '$reduce', TMP_1 = function ːreduce(num, den) {
       var $a, self = this, gcd = nil;
 
       num = num.$to_i();
       den = den.$to_i();
       if (den['$=='](0)) {
         self.$raise($scope.get('ZeroDivisionError'), "divided by 0")
-      } else if ((($a = $rb_lt(den, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = $rb_lt(den, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         num = num['$-@']();
         den = den['$-@']();
       } else if (den['$=='](1)) {
         return self.$new(num, den)};
       gcd = num.$gcd(den);
       return self.$new($rb_divide(num, gcd), $rb_divide(den, gcd));
-    });
+    }, TMP_1.$$arity = 2);
 
-    Opal.defs(self, '$convert', function(num, den) {
+    Opal.defs(self, '$convert', TMP_2 = function ːconvert(num, den) {
       var $a, $b, $c, self = this;
 
-      if ((($a = ((($b = num['$nil?']()) !== false && $b !== nil) ? $b : den['$nil?']())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = num['$nil?']()) !== false && $b !== nil && $b != null) ? $b : den['$nil?']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('TypeError'), "cannot convert nil into Rational")};
-      if ((($a = ($b = $scope.get('Integer')['$==='](num), $b !== false && $b !== nil ?$scope.get('Integer')['$==='](den) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = $scope.get('Integer')['$==='](num), $b !== false && $b !== nil && $b != null ?$scope.get('Integer')['$==='](den) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$reduce(num, den)};
-      if ((($a = ((($b = ((($c = $scope.get('Float')['$==='](num)) !== false && $c !== nil) ? $c : $scope.get('String')['$==='](num))) !== false && $b !== nil) ? $b : $scope.get('Complex')['$==='](num))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = ((($c = $scope.get('Float')['$==='](num)) !== false && $c !== nil && $c != null) ? $c : $scope.get('String')['$==='](num))) !== false && $b !== nil && $b != null) ? $b : $scope.get('Complex')['$==='](num))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         num = num.$to_r()};
-      if ((($a = ((($b = ((($c = $scope.get('Float')['$==='](den)) !== false && $c !== nil) ? $c : $scope.get('String')['$==='](den))) !== false && $b !== nil) ? $b : $scope.get('Complex')['$==='](den))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ((($b = ((($c = $scope.get('Float')['$==='](den)) !== false && $c !== nil && $c != null) ? $c : $scope.get('String')['$==='](den))) !== false && $b !== nil && $b != null) ? $b : $scope.get('Complex')['$==='](den))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         den = den.$to_r()};
-      if ((($a = ($b = den['$equal?'](1), $b !== false && $b !== nil ?($scope.get('Integer')['$==='](num))['$!']() : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = den['$equal?'](1), $b !== false && $b !== nil && $b != null ?($scope.get('Integer')['$==='](num))['$!']() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Opal')['$coerce_to!'](num, $scope.get('Rational'), "to_r")
-      } else if ((($a = ($b = $scope.get('Numeric')['$==='](num), $b !== false && $b !== nil ?$scope.get('Numeric')['$==='](den) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = ($b = $scope.get('Numeric')['$==='](num), $b !== false && $b !== nil && $b != null ?$scope.get('Numeric')['$==='](den) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $rb_divide(num, den)
         } else {
         return self.$reduce(num, den)
       };
-    });
+    }, TMP_2.$$arity = 2);
 
     self.$attr_reader("numerator", "denominator");
 
-    Opal.defn(self, '$initialize', function(num, den) {
+    Opal.defn(self, '$initialize', TMP_3 = function ːinitialize(num, den) {
       var self = this;
 
       self.num = num;
       return self.den = den;
-    });
+    }, TMP_3.$$arity = 2);
 
-    Opal.defn(self, '$numerator', function() {
+    Opal.defn(self, '$numerator', TMP_4 = function ːnumerator() {
       var self = this;
 
       return self.num;
-    });
+    }, TMP_4.$$arity = 0);
 
-    Opal.defn(self, '$denominator', function() {
+    Opal.defn(self, '$denominator', TMP_5 = function ːdenominator() {
       var self = this;
 
       return self.den;
-    });
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$coerce', function(other) {
+    Opal.defn(self, '$coerce', TMP_6 = function ːcoerce(other) {
       var self = this, $case = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {return [other, self]}else if ($scope.get('Integer')['$===']($case)) {return [other.$to_r(), self]}else if ($scope.get('Float')['$===']($case)) {return [other, self.$to_f()]}else { return nil }})();
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_7 = function(other) {
       var $a, self = this, $case = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {return (($a = self.num['$=='](other.$numerator())) ? self.den['$=='](other.$denominator()) : self.num['$=='](other.$numerator()))}else if ($scope.get('Integer')['$===']($case)) {return (($a = self.num['$=='](other)) ? self.den['$=='](1) : self.num['$=='](other))}else if ($scope.get('Float')['$===']($case)) {return self.$to_f()['$=='](other)}else {return other['$=='](self)}})();
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_8 = function(other) {
       var self = this, $case = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {return $rb_minus($rb_times(self.num, other.$denominator()), $rb_times(self.den, other.$numerator()))['$<=>'](0)}else if ($scope.get('Integer')['$===']($case)) {return $rb_minus(self.num, $rb_times(self.den, other))['$<=>'](0)}else if ($scope.get('Float')['$===']($case)) {return self.$to_f()['$<=>'](other)}else {return self.$__coerced__("<=>", other)}})();
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_9 = function(other) {
       var self = this, $case = nil, num = nil, den = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {num = $rb_plus($rb_times(self.num, other.$denominator()), $rb_times(self.den, other.$numerator()));
       den = $rb_times(self.den, other.$denominator());
       return self.$Rational(num, den);}else if ($scope.get('Integer')['$===']($case)) {return self.$Rational($rb_plus(self.num, $rb_times(other, self.den)), self.den)}else if ($scope.get('Float')['$===']($case)) {return $rb_plus(self.$to_f(), other)}else {return self.$__coerced__("+", other)}})();
-    });
+    }, TMP_9.$$arity = 1);
 
-    Opal.defn(self, '$-', function(other) {
+    Opal.defn(self, '$-', TMP_10 = function(other) {
       var self = this, $case = nil, num = nil, den = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {num = $rb_minus($rb_times(self.num, other.$denominator()), $rb_times(self.den, other.$numerator()));
       den = $rb_times(self.den, other.$denominator());
       return self.$Rational(num, den);}else if ($scope.get('Integer')['$===']($case)) {return self.$Rational($rb_minus(self.num, $rb_times(other, self.den)), self.den)}else if ($scope.get('Float')['$===']($case)) {return $rb_minus(self.$to_f(), other)}else {return self.$__coerced__("-", other)}})();
-    });
+    }, TMP_10.$$arity = 1);
 
-    Opal.defn(self, '$*', function(other) {
+    Opal.defn(self, '$*', TMP_11 = function(other) {
       var self = this, $case = nil, num = nil, den = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {num = $rb_times(self.num, other.$numerator());
       den = $rb_times(self.den, other.$denominator());
       return self.$Rational(num, den);}else if ($scope.get('Integer')['$===']($case)) {return self.$Rational($rb_times(self.num, other), self.den)}else if ($scope.get('Float')['$===']($case)) {return $rb_times(self.$to_f(), other)}else {return self.$__coerced__("*", other)}})();
-    });
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$/', function(other) {
+    Opal.defn(self, '$/', TMP_12 = function(other) {
       var self = this, $case = nil, num = nil, den = nil;
 
       return (function() {$case = other;if ($scope.get('Rational')['$===']($case)) {num = $rb_times(self.num, other.$denominator());
@@ -16876,83 +17103,83 @@ Opal.modules["corelib/rational"] = function(Opal) {
         } else {
         return self.$Rational(self.num, $rb_times(self.den, other))
       }}else if ($scope.get('Float')['$===']($case)) {return $rb_divide(self.$to_f(), other)}else {return self.$__coerced__("/", other)}})();
-    });
+    }, TMP_12.$$arity = 1);
 
-    Opal.defn(self, '$**', function(other) {
+    Opal.defn(self, '$**', TMP_13 = function(other) {
       var $a, $b, self = this, $case = nil;
 
-      return (function() {$case = other;if ($scope.get('Integer')['$===']($case)) {if ((($a = (($b = self['$=='](0)) ? $rb_lt(other, 0) : self['$=='](0))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      return (function() {$case = other;if ($scope.get('Integer')['$===']($case)) {if ((($a = (($b = self['$=='](0)) ? $rb_lt(other, 0) : self['$=='](0))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return (($scope.get('Float')).$$scope.get('INFINITY'))
-      } else if ((($a = $rb_gt(other, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = $rb_gt(other, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Rational(self.num['$**'](other), self.den['$**'](other))
-      } else if ((($a = $rb_lt(other, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = $rb_lt(other, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$Rational(self.den['$**'](other['$-@']()), self.num['$**'](other['$-@']()))
         } else {
         return self.$Rational(1, 1)
       }}else if ($scope.get('Float')['$===']($case)) {return self.$to_f()['$**'](other)}else if ($scope.get('Rational')['$===']($case)) {if (other['$=='](0)) {
         return self.$Rational(1, 1)
       } else if (other.$denominator()['$=='](1)) {
-        if ((($a = $rb_lt(other, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(other, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self.$Rational(self.den['$**'](other.$numerator().$abs()), self.num['$**'](other.$numerator().$abs()))
           } else {
           return self.$Rational(self.num['$**'](other.$numerator()), self.den['$**'](other.$numerator()))
         }
-      } else if ((($a = (($b = self['$=='](0)) ? $rb_lt(other, 0) : self['$=='](0))) !== nil && (!$a.$$is_boolean || $a == true))) {
+      } else if ((($a = (($b = self['$=='](0)) ? $rb_lt(other, 0) : self['$=='](0))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$raise($scope.get('ZeroDivisionError'), "divided by 0")
         } else {
         return self.$to_f()['$**'](other)
       }}else {return self.$__coerced__("**", other)}})();
-    });
+    }, TMP_13.$$arity = 1);
 
-    Opal.defn(self, '$abs', function() {
+    Opal.defn(self, '$abs', TMP_14 = function ːabs() {
       var self = this;
 
       return self.$Rational(self.num.$abs(), self.den.$abs());
-    });
+    }, TMP_14.$$arity = 0);
 
-    Opal.defn(self, '$ceil', function(precision) {
+    Opal.defn(self, '$ceil', TMP_15 = function ːceil(precision) {
       var self = this;
 
       if (precision == null) {
-        precision = 0
+        precision = 0;
       }
       if (precision['$=='](0)) {
         return (($rb_divide(self.num['$-@'](), self.den))['$-@']()).$ceil()
         } else {
         return self.$with_precision("ceil", precision)
       };
-    });
+    }, TMP_15.$$arity = -1);
 
     Opal.alias(self, 'divide', '/');
 
-    Opal.defn(self, '$floor', function(precision) {
+    Opal.defn(self, '$floor', TMP_16 = function ːfloor(precision) {
       var self = this;
 
       if (precision == null) {
-        precision = 0
+        precision = 0;
       }
       if (precision['$=='](0)) {
         return (($rb_divide(self.num['$-@'](), self.den))['$-@']()).$floor()
         } else {
         return self.$with_precision("floor", precision)
       };
-    });
+    }, TMP_16.$$arity = -1);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_17 = function ːhash() {
       var self = this;
 
       return "Rational:" + (self.num) + ":" + (self.den);
-    });
+    }, TMP_17.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_18 = function ːinspect() {
       var self = this;
 
       return "(" + (self.$to_s()) + ")";
-    });
+    }, TMP_18.$$arity = 0);
 
     Opal.alias(self, 'quo', '/');
 
-    Opal.defn(self, '$rationalize', function(eps) {
+    Opal.defn(self, '$rationalize', TMP_19 = function ːrationalize(eps) {
       var self = this;
 
       
@@ -16998,13 +17225,13 @@ Opal.modules["corelib/rational"] = function(Opal) {
 
       return self.$Rational(c * p1 + p0, c * q1 + q0);
     ;
-    });
+    }, TMP_19.$$arity = -1);
 
-    Opal.defn(self, '$round', function(precision) {
+    Opal.defn(self, '$round', TMP_20 = function ːround(precision) {
       var $a, self = this, num = nil, den = nil, approx = nil;
 
       if (precision == null) {
-        precision = 0
+        precision = 0;
       }
       if (precision['$=='](0)) {
         } else {
@@ -17017,45 +17244,45 @@ Opal.modules["corelib/rational"] = function(Opal) {
       num = $rb_plus($rb_times(self.num.$abs(), 2), self.den);
       den = $rb_times(self.den, 2);
       approx = ($rb_divide(num, den)).$truncate();
-      if ((($a = $rb_lt(self.num, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_lt(self.num, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return approx['$-@']()
         } else {
         return approx
       };
-    });
+    }, TMP_20.$$arity = -1);
 
-    Opal.defn(self, '$to_f', function() {
+    Opal.defn(self, '$to_f', TMP_21 = function ːto_f() {
       var self = this;
 
       return $rb_divide(self.num, self.den);
-    });
+    }, TMP_21.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function() {
+    Opal.defn(self, '$to_i', TMP_22 = function ːto_i() {
       var self = this;
 
       return self.$truncate();
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$to_r', function() {
+    Opal.defn(self, '$to_r', TMP_23 = function ːto_r() {
       var self = this;
 
       return self;
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$to_s', function() {
+    Opal.defn(self, '$to_s', TMP_24 = function ːto_s() {
       var self = this;
 
       return "" + (self.num) + "/" + (self.den);
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$truncate', function(precision) {
+    Opal.defn(self, '$truncate', TMP_25 = function ːtruncate(precision) {
       var $a, self = this;
 
       if (precision == null) {
-        precision = 0
+        precision = 0;
       }
       if (precision['$=='](0)) {
-        if ((($a = $rb_lt(self.num, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(self.num, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return self.$ceil()
           } else {
           return self.$floor()
@@ -17063,43 +17290,41 @@ Opal.modules["corelib/rational"] = function(Opal) {
         } else {
         return self.$with_precision("truncate", precision)
       };
-    });
+    }, TMP_25.$$arity = -1);
 
-    return (Opal.defn(self, '$with_precision', function(method, precision) {
+    return (Opal.defn(self, '$with_precision', TMP_26 = function ːwith_precision(method, precision) {
       var $a, self = this, p = nil, s = nil;
 
-      if ((($a = $scope.get('Integer')['$==='](precision)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](precision)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         self.$raise($scope.get('TypeError'), "not an Integer")
       };
       p = (10)['$**'](precision);
       s = $rb_times(self, p);
-      if ((($a = $rb_lt(precision, 1)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_lt(precision, 1)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return ($rb_divide(s.$send(method), p)).$to_i()
         } else {
         return self.$Rational(s.$send(method), p)
       };
-    }), nil) && 'with_precision';
+    }, TMP_26.$$arity = 2), nil) && 'with_precision';
   })($scope.base, $scope.get('Numeric'));
   return (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_27;
 
-    Opal.defn(self, '$Rational', function(numerator, denominator) {
+    Opal.defn(self, '$Rational', TMP_27 = function ːRational(numerator, denominator) {
       var self = this;
 
       if (denominator == null) {
-        denominator = 1
+        denominator = 1;
       }
       return $scope.get('Rational').$convert(numerator, denominator);
-    })
+    }, TMP_27.$$arity = -2)
   })($scope.base);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/time"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   function $rb_gt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
   }
@@ -17126,7 +17351,7 @@ Opal.modules["corelib/time"] = function(Opal) {
     function $Time(){};
     var self = $Time = $klass($base, $super, 'Time', $Time);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_21, TMP_22, TMP_23, TMP_24, TMP_25, TMP_26, TMP_27, TMP_28, TMP_29, TMP_30, TMP_31, TMP_32, TMP_33, TMP_34, TMP_35, TMP_36, TMP_37, TMP_38, TMP_39, TMP_40, TMP_41, TMP_42;
 
     self.$include($scope.get('Comparable'));
 
@@ -17137,7 +17362,7 @@ Opal.modules["corelib/time"] = function(Opal) {
         long_months  = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   ;
 
-    Opal.defs(self, '$at', function(seconds, frac) {
+    Opal.defs(self, '$at', TMP_1 = function ːat(seconds, frac) {
       var self = this;
 
       
@@ -17166,7 +17391,7 @@ Opal.modules["corelib/time"] = function(Opal) {
 
       return new Date(seconds * 1000 + (frac / 1000));
     ;
-    });
+    }, TMP_1.$$arity = -2);
 
     
     function time_params(year, month, day, hour, min, sec) {
@@ -17260,26 +17485,26 @@ Opal.modules["corelib/time"] = function(Opal) {
     }
   ;
 
-    Opal.defs(self, '$new', function(year, month, day, hour, min, sec, utc_offset) {
+    Opal.defs(self, '$new', TMP_2 = function(year, month, day, hour, min, sec, utc_offset) {
       var self = this;
 
       if (month == null) {
-        month = nil
+        month = nil;
       }
       if (day == null) {
-        day = nil
+        day = nil;
       }
       if (hour == null) {
-        hour = nil
+        hour = nil;
       }
       if (min == null) {
-        min = nil
+        min = nil;
       }
       if (sec == null) {
-        sec = nil
+        sec = nil;
       }
       if (utc_offset == null) {
-        utc_offset = nil
+        utc_offset = nil;
       }
       
       var args, result;
@@ -17306,37 +17531,37 @@ Opal.modules["corelib/time"] = function(Opal) {
       }
       return result;
     
-    });
+    }, TMP_2.$$arity = -1);
 
-    Opal.defs(self, '$local', function(year, month, day, hour, min, sec, millisecond, _dummy1, _dummy2, _dummy3) {
+    Opal.defs(self, '$local', TMP_3 = function ːlocal(year, month, day, hour, min, sec, millisecond, _dummy1, _dummy2, _dummy3) {
       var self = this;
 
       if (month == null) {
-        month = nil
+        month = nil;
       }
       if (day == null) {
-        day = nil
+        day = nil;
       }
       if (hour == null) {
-        hour = nil
+        hour = nil;
       }
       if (min == null) {
-        min = nil
+        min = nil;
       }
       if (sec == null) {
-        sec = nil
+        sec = nil;
       }
       if (millisecond == null) {
-        millisecond = nil
+        millisecond = nil;
       }
       if (_dummy1 == null) {
-        _dummy1 = nil
+        _dummy1 = nil;
       }
       if (_dummy2 == null) {
-        _dummy2 = nil
+        _dummy2 = nil;
       }
       if (_dummy3 == null) {
-        _dummy3 = nil
+        _dummy3 = nil;
       }
       
       var args, result;
@@ -17365,37 +17590,37 @@ Opal.modules["corelib/time"] = function(Opal) {
       }
       return result;
     
-    });
+    }, TMP_3.$$arity = -2);
 
-    Opal.defs(self, '$gm', function(year, month, day, hour, min, sec, millisecond, _dummy1, _dummy2, _dummy3) {
+    Opal.defs(self, '$gm', TMP_4 = function ːgm(year, month, day, hour, min, sec, millisecond, _dummy1, _dummy2, _dummy3) {
       var self = this;
 
       if (month == null) {
-        month = nil
+        month = nil;
       }
       if (day == null) {
-        day = nil
+        day = nil;
       }
       if (hour == null) {
-        hour = nil
+        hour = nil;
       }
       if (min == null) {
-        min = nil
+        min = nil;
       }
       if (sec == null) {
-        sec = nil
+        sec = nil;
       }
       if (millisecond == null) {
-        millisecond = nil
+        millisecond = nil;
       }
       if (_dummy1 == null) {
-        _dummy1 = nil
+        _dummy1 = nil;
       }
       if (_dummy2 == null) {
-        _dummy2 = nil
+        _dummy2 = nil;
       }
       if (_dummy3 == null) {
-        _dummy3 = nil
+        _dummy3 = nil;
       }
       
       var args, result;
@@ -17425,7 +17650,7 @@ Opal.modules["corelib/time"] = function(Opal) {
       result.is_utc = true;
       return result;
     
-    });
+    }, TMP_4.$$arity = -2);
 
     (function(self) {
       var $scope = self.$$scope, def = self.$$proto;
@@ -17434,16 +17659,16 @@ Opal.modules["corelib/time"] = function(Opal) {
       return Opal.alias(self, 'utc', 'gm');
     })(Opal.get_singleton_class(self));
 
-    Opal.defs(self, '$now', function() {
+    Opal.defs(self, '$now', TMP_5 = function ːnow() {
       var self = this;
 
       return self.$new();
-    });
+    }, TMP_5.$$arity = 0);
 
-    Opal.defn(self, '$+', function(other) {
+    Opal.defn(self, '$+', TMP_6 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Time')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Time')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         self.$raise($scope.get('TypeError'), "time + time?")};
       
       if (!other.$$is_number) {
@@ -17453,12 +17678,12 @@ Opal.modules["corelib/time"] = function(Opal) {
       result.is_utc = self.is_utc;
       return result;
     ;
-    });
+    }, TMP_6.$$arity = 1);
 
-    Opal.defn(self, '$-', function(other) {
+    Opal.defn(self, '$-', TMP_7 = function(other) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Time')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Time')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return (self.getTime() - other.getTime()) / 1000};
       
       if (!other.$$is_number) {
@@ -17468,57 +17693,57 @@ Opal.modules["corelib/time"] = function(Opal) {
       result.is_utc = self.is_utc;
       return result;
     ;
-    });
+    }, TMP_7.$$arity = 1);
 
-    Opal.defn(self, '$<=>', function(other) {
+    Opal.defn(self, '$<=>', TMP_8 = function(other) {
       var $a, self = this, r = nil;
 
-      if ((($a = $scope.get('Time')['$==='](other)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Time')['$==='](other)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$to_f()['$<=>'](other.$to_f())
         } else {
         r = other['$<=>'](self);
-        if ((($a = r['$nil?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = r['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return nil
-        } else if ((($a = $rb_gt(r, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        } else if ((($a = $rb_gt(r, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return -1
-        } else if ((($a = $rb_lt(r, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        } else if ((($a = $rb_lt(r, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           return 1
           } else {
           return 0
         };
       };
-    });
+    }, TMP_8.$$arity = 1);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_9 = function(other) {
       var self = this;
 
       return self.$to_f() === other.$to_f();
-    });
+    }, TMP_9.$$arity = 1);
 
-    Opal.defn(self, '$asctime', function() {
+    Opal.defn(self, '$asctime', TMP_10 = function ːasctime() {
       var self = this;
 
       return self.$strftime("%a %b %e %H:%M:%S %Y");
-    });
+    }, TMP_10.$$arity = 0);
 
     Opal.alias(self, 'ctime', 'asctime');
 
-    Opal.defn(self, '$day', function() {
+    Opal.defn(self, '$day', TMP_11 = function ːday() {
       var self = this;
 
       return self.is_utc ? self.getUTCDate() : self.getDate();
-    });
+    }, TMP_11.$$arity = 0);
 
-    Opal.defn(self, '$yday', function() {
+    Opal.defn(self, '$yday', TMP_12 = function ːyday() {
       var self = this, start_of_year = nil, start_of_day = nil, one_day = nil;
 
       start_of_year = $scope.get('Time').$new(self.$year()).$to_i();
       start_of_day = $scope.get('Time').$new(self.$year(), self.$month(), self.$day()).$to_i();
       one_day = 86400;
       return $rb_plus(($rb_divide(($rb_minus(start_of_day, start_of_year)), one_day)).$round(), 1);
-    });
+    }, TMP_12.$$arity = 0);
 
-    Opal.defn(self, '$isdst', function() {
+    Opal.defn(self, '$isdst', TMP_13 = function ːisdst() {
       var self = this;
 
       
@@ -17526,88 +17751,88 @@ Opal.modules["corelib/time"] = function(Opal) {
           jul = new Date(self.getFullYear(), 6, 1);
       return self.getTimezoneOffset() < Math.max(jan.getTimezoneOffset(), jul.getTimezoneOffset());
     
-    });
+    }, TMP_13.$$arity = 0);
 
     Opal.alias(self, 'dst?', 'isdst');
 
-    Opal.defn(self, '$dup', function() {
+    Opal.defn(self, '$dup', TMP_14 = function ːdup() {
       var self = this, copy = nil;
 
       copy = new Date(self.getTime());
       copy.$copy_instance_variables(self);
       copy.$initialize_dup(self);
       return copy;
-    });
+    }, TMP_14.$$arity = 0);
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_15 = function(other) {
       var $a, self = this;
 
-      return ($a = other['$is_a?']($scope.get('Time')), $a !== false && $a !== nil ?(self['$<=>'](other))['$zero?']() : $a);
-    });
+      return ($a = other['$is_a?']($scope.get('Time')), $a !== false && $a !== nil && $a != null ?(self['$<=>'](other))['$zero?']() : $a);
+    }, TMP_15.$$arity = 1);
 
-    Opal.defn(self, '$friday?', function() {
+    Opal.defn(self, '$friday?', TMP_16 = function() {
       var self = this;
 
       return self.$wday() == 5;
-    });
+    }, TMP_16.$$arity = 0);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_17 = function ːhash() {
       var self = this;
 
       return 'Time:' + self.getTime();
-    });
+    }, TMP_17.$$arity = 0);
 
-    Opal.defn(self, '$hour', function() {
+    Opal.defn(self, '$hour', TMP_18 = function ːhour() {
       var self = this;
 
       return self.is_utc ? self.getUTCHours() : self.getHours();
-    });
+    }, TMP_18.$$arity = 0);
 
-    Opal.defn(self, '$inspect', function() {
+    Opal.defn(self, '$inspect', TMP_19 = function ːinspect() {
       var $a, self = this;
 
-      if ((($a = self['$utc?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = self['$utc?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return self.$strftime("%Y-%m-%d %H:%M:%S UTC")
         } else {
         return self.$strftime("%Y-%m-%d %H:%M:%S %z")
       };
-    });
+    }, TMP_19.$$arity = 0);
 
     Opal.alias(self, 'mday', 'day');
 
-    Opal.defn(self, '$min', function() {
+    Opal.defn(self, '$min', TMP_20 = function ːmin() {
       var self = this;
 
       return self.is_utc ? self.getUTCMinutes() : self.getMinutes();
-    });
+    }, TMP_20.$$arity = 0);
 
-    Opal.defn(self, '$mon', function() {
+    Opal.defn(self, '$mon', TMP_21 = function ːmon() {
       var self = this;
 
       return (self.is_utc ? self.getUTCMonth() : self.getMonth()) + 1;
-    });
+    }, TMP_21.$$arity = 0);
 
-    Opal.defn(self, '$monday?', function() {
+    Opal.defn(self, '$monday?', TMP_22 = function() {
       var self = this;
 
       return self.$wday() == 1;
-    });
+    }, TMP_22.$$arity = 0);
 
     Opal.alias(self, 'month', 'mon');
 
-    Opal.defn(self, '$saturday?', function() {
+    Opal.defn(self, '$saturday?', TMP_23 = function() {
       var self = this;
 
       return self.$wday() == 6;
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$sec', function() {
+    Opal.defn(self, '$sec', TMP_24 = function ːsec() {
       var self = this;
 
       return self.is_utc ? self.getUTCSeconds() : self.getSeconds();
-    });
+    }, TMP_24.$$arity = 0);
 
-    Opal.defn(self, '$succ', function() {
+    Opal.defn(self, '$succ', TMP_25 = function ːsucc() {
       var self = this;
 
       
@@ -17615,15 +17840,15 @@ Opal.modules["corelib/time"] = function(Opal) {
       result.is_utc = self.is_utc;
       return result;
     
-    });
+    }, TMP_25.$$arity = 0);
 
-    Opal.defn(self, '$usec', function() {
+    Opal.defn(self, '$usec', TMP_26 = function ːusec() {
       var self = this;
 
       return self.getMilliseconds() * 1000;
-    });
+    }, TMP_26.$$arity = 0);
 
-    Opal.defn(self, '$zone', function() {
+    Opal.defn(self, '$zone', TMP_27 = function ːzone() {
       var self = this;
 
       
@@ -17644,9 +17869,9 @@ Opal.modules["corelib/time"] = function(Opal) {
         return result;
       }
     
-    });
+    }, TMP_27.$$arity = 0);
 
-    Opal.defn(self, '$getgm', function() {
+    Opal.defn(self, '$getgm', TMP_28 = function ːgetgm() {
       var self = this;
 
       
@@ -17654,34 +17879,34 @@ Opal.modules["corelib/time"] = function(Opal) {
       result.is_utc = true;
       return result;
     
-    });
+    }, TMP_28.$$arity = 0);
 
     Opal.alias(self, 'getutc', 'getgm');
 
-    Opal.defn(self, '$gmtime', function() {
+    Opal.defn(self, '$gmtime', TMP_29 = function ːgmtime() {
       var self = this;
 
       
       self.is_utc = true;
       return self;
     
-    });
+    }, TMP_29.$$arity = 0);
 
     Opal.alias(self, 'utc', 'gmtime');
 
-    Opal.defn(self, '$gmt?', function() {
+    Opal.defn(self, '$gmt?', TMP_30 = function() {
       var self = this;
 
       return self.is_utc === true;
-    });
+    }, TMP_30.$$arity = 0);
 
-    Opal.defn(self, '$gmt_offset', function() {
+    Opal.defn(self, '$gmt_offset', TMP_31 = function ːgmt_offset() {
       var self = this;
 
       return -self.getTimezoneOffset() * 60;
-    });
+    }, TMP_31.$$arity = 0);
 
-    Opal.defn(self, '$strftime', function(format) {
+    Opal.defn(self, '$strftime', TMP_32 = function ːstrftime(format) {
       var self = this;
 
       
@@ -17919,45 +18144,45 @@ Opal.modules["corelib/time"] = function(Opal) {
         return result;
       });
     
-    });
+    }, TMP_32.$$arity = 1);
 
-    Opal.defn(self, '$sunday?', function() {
+    Opal.defn(self, '$sunday?', TMP_33 = function() {
       var self = this;
 
       return self.$wday() == 0;
-    });
+    }, TMP_33.$$arity = 0);
 
-    Opal.defn(self, '$thursday?', function() {
+    Opal.defn(self, '$thursday?', TMP_34 = function() {
       var self = this;
 
       return self.$wday() == 4;
-    });
+    }, TMP_34.$$arity = 0);
 
-    Opal.defn(self, '$to_a', function() {
+    Opal.defn(self, '$to_a', TMP_35 = function ːto_a() {
       var self = this;
 
       return [self.$sec(), self.$min(), self.$hour(), self.$day(), self.$month(), self.$year(), self.$wday(), self.$yday(), self.$isdst(), self.$zone()];
-    });
+    }, TMP_35.$$arity = 0);
 
-    Opal.defn(self, '$to_f', function() {
+    Opal.defn(self, '$to_f', TMP_36 = function ːto_f() {
       var self = this;
 
       return self.getTime() / 1000;
-    });
+    }, TMP_36.$$arity = 0);
 
-    Opal.defn(self, '$to_i', function() {
+    Opal.defn(self, '$to_i', TMP_37 = function ːto_i() {
       var self = this;
 
       return parseInt(self.getTime() / 1000, 10);
-    });
+    }, TMP_37.$$arity = 0);
 
     Opal.alias(self, 'to_s', 'inspect');
 
-    Opal.defn(self, '$tuesday?', function() {
+    Opal.defn(self, '$tuesday?', TMP_38 = function() {
       var self = this;
 
       return self.$wday() == 2;
-    });
+    }, TMP_38.$$arity = 0);
 
     Opal.alias(self, 'tv_sec', 'sec');
 
@@ -17969,32 +18194,32 @@ Opal.modules["corelib/time"] = function(Opal) {
 
     Opal.alias(self, 'utc_offset', 'gmt_offset');
 
-    Opal.defn(self, '$wday', function() {
+    Opal.defn(self, '$wday', TMP_39 = function ːwday() {
       var self = this;
 
       return self.is_utc ? self.getUTCDay() : self.getDay();
-    });
+    }, TMP_39.$$arity = 0);
 
-    Opal.defn(self, '$wednesday?', function() {
+    Opal.defn(self, '$wednesday?', TMP_40 = function() {
       var self = this;
 
       return self.$wday() == 3;
-    });
+    }, TMP_40.$$arity = 0);
 
-    Opal.defn(self, '$year', function() {
+    Opal.defn(self, '$year', TMP_41 = function ːyear() {
       var self = this;
 
       return self.is_utc ? self.getUTCFullYear() : self.getFullYear();
-    });
+    }, TMP_41.$$arity = 0);
 
-    return (Opal.defn(self, '$cweek_cyear', function() {
+    return (Opal.defn(self, '$cweek_cyear', TMP_42 = function ːcweek_cyear() {
       var $a, $b, self = this, jan01 = nil, jan01_wday = nil, first_monday = nil, year = nil, offset = nil, week = nil, dec31 = nil, dec31_wday = nil;
 
       jan01 = $scope.get('Time').$new(self.$year(), 1, 1);
       jan01_wday = jan01.$wday();
       first_monday = 0;
       year = self.$year();
-      if ((($a = ($b = $rb_le(jan01_wday, 4), $b !== false && $b !== nil ?jan01_wday['$!='](0) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = ($b = $rb_le(jan01_wday, 4), $b !== false && $b !== nil && $b != null ?jan01_wday['$!='](0) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         offset = $rb_minus(jan01_wday, 1)
         } else {
         offset = $rb_minus($rb_minus(jan01_wday, 7), 1);
@@ -18002,22 +18227,23 @@ Opal.modules["corelib/time"] = function(Opal) {
           offset = -1};
       };
       week = ($rb_divide(($rb_plus(self.$yday(), offset)), 7.0)).$ceil();
-      if ((($a = $rb_le(week, 0)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $rb_le(week, 0)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         return $scope.get('Time').$new($rb_minus(self.$year(), 1), 12, 31).$cweek_cyear()
       } else if (week['$=='](53)) {
         dec31 = $scope.get('Time').$new(self.$year(), 12, 31);
         dec31_wday = dec31.$wday();
-        if ((($a = ($b = $rb_le(dec31_wday, 3), $b !== false && $b !== nil ?dec31_wday['$!='](0) : $b)) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = ($b = $rb_le(dec31_wday, 3), $b !== false && $b !== nil && $b != null ?dec31_wday['$!='](0) : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           week = 1;
           year = $rb_plus(year, 1);};};
       return [week, year];
-    }), nil) && 'cweek_cyear';
+    }, TMP_42.$$arity = 0), nil) && 'cweek_cyear';
   })($scope.base, Date);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/struct"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
+  function $rb_gt(lhs, rhs) {
+    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs > rhs : lhs['$>'](rhs);
+  }
   function $rb_lt(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs < rhs : lhs['$<'](rhs);
   }
@@ -18029,136 +18255,142 @@ Opal.modules["corelib/struct"] = function(Opal) {
   }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $hash2 = Opal.hash2;
 
-  Opal.add_stubs(['$require', '$include', '$==', '$[]', '$upcase', '$const_set', '$new', '$unshift', '$each', '$define_struct_attribute', '$class_eval', '$to_proc', '$allocate', '$initialize', '$raise', '$<<', '$members', '$define_method', '$instance_eval', '$each_with_index', '$[]=', '$class', '$hash', '$===', '$<', '$-@', '$size', '$>=', '$coerce_to!', '$include?', '$to_sym', '$instance_of?', '$__id__', '$eql?', '$enum_for', '$length', '$map', '$+', '$join', '$inspect', '$each_pair', '$inject', '$flatten', '$to_a']);
+  Opal.add_stubs(['$require', '$include', '$const_name!', '$unshift', '$map', '$coerce_to!', '$new', '$each', '$define_struct_attribute', '$allocate', '$initialize', '$module_eval', '$to_proc', '$const_set', '$==', '$raise', '$<<', '$members', '$define_method', '$instance_eval', '$>', '$length', '$class', '$each_with_index', '$[]=', '$[]', '$hash', '$===', '$<', '$-@', '$size', '$>=', '$include?', '$to_sym', '$instance_of?', '$__id__', '$eql?', '$enum_for', '$name', '$+', '$join', '$inspect', '$each_pair', '$inject', '$flatten', '$to_a', '$values_at']);
   self.$require("corelib/enumerable");
   return (function($base, $super) {
     function $Struct(){};
     var self = $Struct = $klass($base, $super, 'Struct', $Struct);
 
-    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_8, TMP_11;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_8, TMP_9, TMP_11, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18, TMP_19, TMP_20, TMP_23, TMP_26, TMP_28, TMP_30, TMP_32, TMP_34, TMP_35;
 
     self.$include($scope.get('Enumerable'));
 
-    Opal.defs(self, '$new', TMP_1 = function(name) {
-      var $a, $b, $c, TMP_2, self = this, $iter = TMP_1.$$p, block = $iter || nil, $splat_index = nil, $zuper = nil, $zuper_index = nil;
+    Opal.defs(self, '$new', TMP_1 = function(const_name, $a_rest) {
+      var $b, $c, TMP_2, $d, TMP_3, $e, self = this, args, $iter = TMP_1.$$p, block = $iter || nil, klass = nil;
 
-      var array_size = arguments.length - 1;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 1];
+      var $args_len = arguments.length, $rest_len = $args_len - 1;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 1; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 1] = arguments[$arg_idx];
       }
       TMP_1.$$p = null;
-      $zuper = [];
-      for($zuper_index = 0; $zuper_index < arguments.length; $zuper_index++) {
-        $zuper[$zuper_index] = arguments[$zuper_index];
-      }
-      if (self['$==']($scope.get('Struct'))) {
-        } else {
-        return Opal.find_super_dispatcher(self, 'new', TMP_1, $iter, $Struct).apply(self, $zuper)
-      };
-      if (name['$[]'](0)['$=='](name['$[]'](0).$upcase())) {
-        return $scope.get('Struct').$const_set(name, ($a = self).$new.apply($a, Opal.to_a(args)))
-        } else {
-        args.$unshift(name);
-        return ($b = ($c = $scope.get('Class')).$new, $b.$$p = (TMP_2 = function(){var self = TMP_2.$$s || this, $a, $b, TMP_3, $c;
-
-        ($a = ($b = args).$each, $a.$$p = (TMP_3 = function(arg){var self = TMP_3.$$s || this;
+      if (const_name !== false && const_name !== nil && const_name != null) {
+        try {
+          const_name = $scope.get('Opal')['$const_name!'](const_name)
+        } catch ($err) {
+          if (Opal.rescue($err, [$scope.get('TypeError'), $scope.get('NameError')])) {
+            try {
+              args.$unshift(const_name);
+              const_name = nil;
+            } finally { Opal.pop_exception() }
+          } else { throw $err; }
+        }};
+      ($b = ($c = args).$map, $b.$$p = (TMP_2 = function(arg){var self = TMP_2.$$s || this;
 if (arg == null) arg = nil;
-          return self.$define_struct_attribute(arg)}, TMP_3.$$s = self, TMP_3), $a).call($b);
-          if (block !== false && block !== nil) {
-            ($a = ($c = self).$class_eval, $a.$$p = block.$to_proc(), $a).call($c)};
-          return (function(self) {
-            var $scope = self.$$scope, def = self.$$proto;
+      return $scope.get('Opal')['$coerce_to!'](arg, $scope.get('String'), "to_str")}, TMP_2.$$s = self, TMP_2.$$arity = 1, TMP_2), $b).call($c);
+      klass = ($b = ($d = $scope.get('Class')).$new, $b.$$p = (TMP_3 = function(){var self = TMP_3.$$s || this, $a, $e, TMP_4;
 
-            Opal.defn(self, '$new', function() {
-              var $a, self = this, instance = nil, $splat_index = nil;
+      ($a = ($e = args).$each, $a.$$p = (TMP_4 = function(arg){var self = TMP_4.$$s || this;
+if (arg == null) arg = nil;
+        return self.$define_struct_attribute(arg)}, TMP_4.$$s = self, TMP_4.$$arity = 1, TMP_4), $a).call($e);
+        return (function(self) {
+          var $scope = self.$$scope, def = self.$$proto, TMP_5;
 
-              var array_size = arguments.length - 0;
-              if(array_size < 0) array_size = 0;
-              var args = new Array(array_size);
-              for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-                args[$splat_index] = arguments[$splat_index + 0];
-              }
-              instance = self.$allocate();
-              instance.$$data = {};;
-              ($a = instance).$initialize.apply($a, Opal.to_a(args));
-              return instance;
-            });
-            return Opal.alias(self, '[]', 'new');
-          })(Opal.get_singleton_class(self));}, TMP_2.$$s = self, TMP_2), $b).call($c, self);
-      };
-    });
+          Opal.defn(self, '$new', TMP_5 = function($a_rest) {
+            var $b, self = this, args, instance = nil;
 
-    Opal.defs(self, '$define_struct_attribute', function(name) {
-      var $a, $b, TMP_4, $c, TMP_5, self = this;
+            var $args_len = arguments.length, $rest_len = $args_len - 0;
+            if ($rest_len < 0) { $rest_len = 0; }
+            args = new Array($rest_len);
+            for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+              args[$arg_idx - 0] = arguments[$arg_idx];
+            }
+            instance = self.$allocate();
+            instance.$$data = {};;
+            ($b = instance).$initialize.apply($b, Opal.to_a(args));
+            return instance;
+          }, TMP_5.$$arity = -1);
+          return Opal.alias(self, '[]', 'new');
+        })(Opal.get_singleton_class(self));}, TMP_3.$$s = self, TMP_3.$$arity = 0, TMP_3), $b).call($d, self);
+      if (block !== false && block !== nil && block != null) {
+        ($b = ($e = klass).$module_eval, $b.$$p = block.$to_proc(), $b).call($e)};
+      if (const_name !== false && const_name !== nil && const_name != null) {
+        $scope.get('Struct').$const_set(const_name, klass)};
+      return klass;
+    }, TMP_1.$$arity = -2);
+
+    Opal.defs(self, '$define_struct_attribute', TMP_8 = function ːdefine_struct_attribute(name) {
+      var $a, $b, TMP_6, $c, TMP_7, self = this;
 
       if (self['$==']($scope.get('Struct'))) {
         self.$raise($scope.get('ArgumentError'), "you cannot define attributes to the Struct class")};
       self.$members()['$<<'](name);
-      ($a = ($b = self).$define_method, $a.$$p = (TMP_4 = function(){var self = TMP_4.$$s || this;
+      ($a = ($b = self).$define_method, $a.$$p = (TMP_6 = function(){var self = TMP_6.$$s || this;
 
-      return self.$$data[name];}, TMP_4.$$s = self, TMP_4), $a).call($b, name);
-      return ($a = ($c = self).$define_method, $a.$$p = (TMP_5 = function(value){var self = TMP_5.$$s || this;
+      return self.$$data[name];}, TMP_6.$$s = self, TMP_6.$$arity = 0, TMP_6), $a).call($b, name);
+      return ($a = ($c = self).$define_method, $a.$$p = (TMP_7 = function(value){var self = TMP_7.$$s || this;
 if (value == null) value = nil;
-      return self.$$data[name] = value;}, TMP_5.$$s = self, TMP_5), $a).call($c, "" + (name) + "=");
-    });
+      return self.$$data[name] = value;}, TMP_7.$$s = self, TMP_7.$$arity = 1, TMP_7), $a).call($c, "" + (name) + "=");
+    }, TMP_8.$$arity = 1);
 
-    Opal.defs(self, '$members', function() {
+    Opal.defs(self, '$members', TMP_9 = function ːmembers() {
       var $a, self = this;
       if (self.members == null) self.members = nil;
 
       if (self['$==']($scope.get('Struct'))) {
         self.$raise($scope.get('ArgumentError'), "the Struct class has no members")};
-      return ((($a = self.members) !== false && $a !== nil) ? $a : self.members = []);
-    });
+      return ((($a = self.members) !== false && $a !== nil && $a != null) ? $a : self.members = []);
+    }, TMP_9.$$arity = 0);
 
-    Opal.defs(self, '$inherited', function(klass) {
-      var $a, $b, TMP_6, self = this, members = nil;
+    Opal.defs(self, '$inherited', TMP_11 = function ːinherited(klass) {
+      var $a, $b, TMP_10, self = this, members = nil;
       if (self.members == null) self.members = nil;
 
       members = self.members;
-      return ($a = ($b = klass).$instance_eval, $a.$$p = (TMP_6 = function(){var self = TMP_6.$$s || this;
+      return ($a = ($b = klass).$instance_eval, $a.$$p = (TMP_10 = function(){var self = TMP_10.$$s || this;
 
-      return self.members = members}, TMP_6.$$s = self, TMP_6), $a).call($b);
-    });
+      return self.members = members}, TMP_10.$$s = self, TMP_10.$$arity = 0, TMP_10), $a).call($b);
+    }, TMP_11.$$arity = 1);
 
-    Opal.defn(self, '$initialize', function() {
-      var $a, $b, TMP_7, self = this, $splat_index = nil;
+    Opal.defn(self, '$initialize', TMP_13 = function ːinitialize($a_rest) {
+      var $b, $c, TMP_12, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      return ($a = ($b = self.$members()).$each_with_index, $a.$$p = (TMP_7 = function(name, index){var self = TMP_7.$$s || this;
+      if ((($b = $rb_gt(args.$length(), self.$class().$members().$length())) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
+        self.$raise($scope.get('ArgumentError'), "struct size differs")};
+      return ($b = ($c = self.$class().$members()).$each_with_index, $b.$$p = (TMP_12 = function(name, index){var self = TMP_12.$$s || this;
 if (name == null) name = nil;if (index == null) index = nil;
-      return self['$[]='](name, args['$[]'](index))}, TMP_7.$$s = self, TMP_7), $a).call($b);
-    });
+      return self['$[]='](name, args['$[]'](index))}, TMP_12.$$s = self, TMP_12.$$arity = 2, TMP_12), $b).call($c);
+    }, TMP_13.$$arity = -1);
 
-    Opal.defn(self, '$members', function() {
+    Opal.defn(self, '$members', TMP_14 = function ːmembers() {
       var self = this;
 
       return self.$class().$members();
-    });
+    }, TMP_14.$$arity = 0);
 
-    Opal.defn(self, '$hash', function() {
+    Opal.defn(self, '$hash', TMP_15 = function ːhash() {
       var self = this;
 
       return $scope.get('Hash').$new(self.$$data).$hash();
-    });
+    }, TMP_15.$$arity = 0);
 
-    Opal.defn(self, '$[]', function(name) {
+    Opal.defn(self, '$[]', TMP_16 = function(name) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](name)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = $rb_lt(name, self.$members().$size()['$-@']())) !== nil && (!$a.$$is_boolean || $a == true))) {
-          self.$raise($scope.get('IndexError'), "offset " + (name) + " too small for struct(size:" + (self.$members().$size()) + ")")};
-        if ((($a = $rb_ge(name, self.$members().$size())) !== nil && (!$a.$$is_boolean || $a == true))) {
-          self.$raise($scope.get('IndexError'), "offset " + (name) + " too large for struct(size:" + (self.$members().$size()) + ")")};
-        name = self.$members()['$[]'](name);
-      } else if ((($a = $scope.get('String')['$==='](name)) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](name)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(name, self.$class().$members().$size()['$-@']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$raise($scope.get('IndexError'), "offset " + (name) + " too small for struct(size:" + (self.$class().$members().$size()) + ")")};
+        if ((($a = $rb_ge(name, self.$class().$members().$size())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$raise($scope.get('IndexError'), "offset " + (name) + " too large for struct(size:" + (self.$class().$members().$size()) + ")")};
+        name = self.$class().$members()['$[]'](name);
+      } else if ((($a = $scope.get('String')['$==='](name)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         
         if(!self.$$data.hasOwnProperty(name)) {
           self.$raise($scope.get('NameError').$new("no member '" + (name) + "' in struct", name))
@@ -18169,19 +18401,19 @@ if (name == null) name = nil;if (index == null) index = nil;
       };
       name = $scope.get('Opal')['$coerce_to!'](name, $scope.get('String'), "to_str");
       return self.$$data[name];
-    });
+    }, TMP_16.$$arity = 1);
 
-    Opal.defn(self, '$[]=', function(name, value) {
+    Opal.defn(self, '$[]=', TMP_17 = function(name, value) {
       var $a, self = this;
 
-      if ((($a = $scope.get('Integer')['$==='](name)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = $rb_lt(name, self.$members().$size()['$-@']())) !== nil && (!$a.$$is_boolean || $a == true))) {
-          self.$raise($scope.get('IndexError'), "offset " + (name) + " too small for struct(size:" + (self.$members().$size()) + ")")};
-        if ((($a = $rb_ge(name, self.$members().$size())) !== nil && (!$a.$$is_boolean || $a == true))) {
-          self.$raise($scope.get('IndexError'), "offset " + (name) + " too large for struct(size:" + (self.$members().$size()) + ")")};
-        name = self.$members()['$[]'](name);
-      } else if ((($a = $scope.get('String')['$==='](name)) !== nil && (!$a.$$is_boolean || $a == true))) {
-        if ((($a = self.$members()['$include?'](name.$to_sym())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = $scope.get('Integer')['$==='](name)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = $rb_lt(name, self.$class().$members().$size()['$-@']())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$raise($scope.get('IndexError'), "offset " + (name) + " too small for struct(size:" + (self.$class().$members().$size()) + ")")};
+        if ((($a = $rb_ge(name, self.$class().$members().$size())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$raise($scope.get('IndexError'), "offset " + (name) + " too large for struct(size:" + (self.$class().$members().$size()) + ")")};
+        name = self.$class().$members()['$[]'](name);
+      } else if ((($a = $scope.get('String')['$==='](name)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+        if ((($a = self.$class().$members()['$include?'](name.$to_sym())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
           } else {
           self.$raise($scope.get('NameError').$new("no member '" + (name) + "' in struct", name))
         }
@@ -18190,12 +18422,12 @@ if (name == null) name = nil;if (index == null) index = nil;
       };
       name = $scope.get('Opal')['$coerce_to!'](name, $scope.get('String'), "to_str");
       return self.$$data[name] = value;
-    });
+    }, TMP_17.$$arity = 2);
 
-    Opal.defn(self, '$==', function(other) {
+    Opal.defn(self, '$==', TMP_18 = function(other) {
       var $a, self = this;
 
-      if ((($a = other['$instance_of?'](self.$class())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other['$instance_of?'](self.$class())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return false
       };
@@ -18230,12 +18462,12 @@ if (name == null) name = nil;if (index == null) index = nil;
 
       return _eqeq(self, other);
     ;
-    });
+    }, TMP_18.$$arity = 1);
 
-    Opal.defn(self, '$eql?', function(other) {
+    Opal.defn(self, '$eql?', TMP_19 = function(other) {
       var $a, self = this;
 
-      if ((($a = other['$instance_of?'](self.$class())) !== nil && (!$a.$$is_boolean || $a == true))) {
+      if ((($a = other['$instance_of?'](self.$class())) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         } else {
         return false
       };
@@ -18270,94 +18502,94 @@ if (name == null) name = nil;if (index == null) index = nil;
 
       return _eqeq(self, other);
     ;
-    });
+    }, TMP_19.$$arity = 1);
 
-    Opal.defn(self, '$each', TMP_8 = function() {
-      var $a, $b, TMP_9, $c, TMP_10, self = this, $iter = TMP_8.$$p, $yield = $iter || nil;
+    Opal.defn(self, '$each', TMP_20 = function ːeach() {
+      var $a, $b, TMP_21, $c, TMP_22, self = this, $iter = TMP_20.$$p, $yield = $iter || nil;
 
-      TMP_8.$$p = null;
+      TMP_20.$$p = null;
       if (($yield !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_9 = function(){var self = TMP_9.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_21 = function(){var self = TMP_21.$$s || this;
 
-        return self.$size()}, TMP_9.$$s = self, TMP_9), $a).call($b, "each")
+        return self.$size()}, TMP_21.$$s = self, TMP_21.$$arity = 0, TMP_21), $a).call($b, "each")
       };
-      ($a = ($c = self.$members()).$each, $a.$$p = (TMP_10 = function(name){var self = TMP_10.$$s || this, $a;
+      ($a = ($c = self.$class().$members()).$each, $a.$$p = (TMP_22 = function(name){var self = TMP_22.$$s || this;
 if (name == null) name = nil;
-      return $a = Opal.yield1($yield, self['$[]'](name)), $a === $breaker ? $a : $a}, TMP_10.$$s = self, TMP_10), $a).call($c);
+      return Opal.yield1($yield, self['$[]'](name));}, TMP_22.$$s = self, TMP_22.$$arity = 1, TMP_22), $a).call($c);
       return self;
-    });
+    }, TMP_20.$$arity = 0);
 
-    Opal.defn(self, '$each_pair', TMP_11 = function() {
-      var $a, $b, TMP_12, $c, TMP_13, self = this, $iter = TMP_11.$$p, $yield = $iter || nil;
+    Opal.defn(self, '$each_pair', TMP_23 = function ːeach_pair() {
+      var $a, $b, TMP_24, $c, TMP_25, self = this, $iter = TMP_23.$$p, $yield = $iter || nil;
 
-      TMP_11.$$p = null;
+      TMP_23.$$p = null;
       if (($yield !== nil)) {
         } else {
-        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_12 = function(){var self = TMP_12.$$s || this;
+        return ($a = ($b = self).$enum_for, $a.$$p = (TMP_24 = function(){var self = TMP_24.$$s || this;
 
-        return self.$size()}, TMP_12.$$s = self, TMP_12), $a).call($b, "each_pair")
+        return self.$size()}, TMP_24.$$s = self, TMP_24.$$arity = 0, TMP_24), $a).call($b, "each_pair")
       };
-      ($a = ($c = self.$members()).$each, $a.$$p = (TMP_13 = function(name){var self = TMP_13.$$s || this, $a;
+      ($a = ($c = self.$class().$members()).$each, $a.$$p = (TMP_25 = function(name){var self = TMP_25.$$s || this;
 if (name == null) name = nil;
-      return $a = Opal.yield1($yield, [name, self['$[]'](name)]), $a === $breaker ? $a : $a}, TMP_13.$$s = self, TMP_13), $a).call($c);
+      return Opal.yield1($yield, [name, self['$[]'](name)]);}, TMP_25.$$s = self, TMP_25.$$arity = 1, TMP_25), $a).call($c);
       return self;
-    });
+    }, TMP_23.$$arity = 0);
 
-    Opal.defn(self, '$length', function() {
+    Opal.defn(self, '$length', TMP_26 = function ːlength() {
       var self = this;
 
-      return self.$members().$length();
-    });
+      return self.$class().$members().$length();
+    }, TMP_26.$$arity = 0);
 
     Opal.alias(self, 'size', 'length');
 
-    Opal.defn(self, '$to_a', function() {
-      var $a, $b, TMP_14, self = this;
+    Opal.defn(self, '$to_a', TMP_28 = function ːto_a() {
+      var $a, $b, TMP_27, self = this;
 
-      return ($a = ($b = self.$members()).$map, $a.$$p = (TMP_14 = function(name){var self = TMP_14.$$s || this;
+      return ($a = ($b = self.$class().$members()).$map, $a.$$p = (TMP_27 = function(name){var self = TMP_27.$$s || this;
 if (name == null) name = nil;
-      return self['$[]'](name)}, TMP_14.$$s = self, TMP_14), $a).call($b);
-    });
+      return self['$[]'](name)}, TMP_27.$$s = self, TMP_27.$$arity = 1, TMP_27), $a).call($b);
+    }, TMP_28.$$arity = 0);
 
     Opal.alias(self, 'values', 'to_a');
 
-    Opal.defn(self, '$inspect', function() {
-      var $a, $b, TMP_15, self = this, result = nil;
+    Opal.defn(self, '$inspect', TMP_30 = function ːinspect() {
+      var $a, $b, TMP_29, self = this, result = nil;
 
       result = "#<struct ";
-      if (self.$class()['$==']($scope.get('Struct'))) {
+      if ((($a = ($b = $scope.get('Struct')['$==='](self), $b !== false && $b !== nil && $b != null ?self.$class().$name() : $b)) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
         result = $rb_plus(result, "" + (self.$class()) + " ")};
-      result = $rb_plus(result, ($a = ($b = self.$each_pair()).$map, $a.$$p = (TMP_15 = function(name, value){var self = TMP_15.$$s || this;
+      result = $rb_plus(result, ($a = ($b = self.$each_pair()).$map, $a.$$p = (TMP_29 = function(name, value){var self = TMP_29.$$s || this;
 if (name == null) name = nil;if (value == null) value = nil;
-      return "" + (name) + "=" + (value.$inspect())}, TMP_15.$$s = self, TMP_15), $a).call($b).$join(", "));
+      return "" + (name) + "=" + (value.$inspect())}, TMP_29.$$s = self, TMP_29.$$arity = 2, TMP_29), $a).call($b).$join(", "));
       result = $rb_plus(result, ">");
       return result;
-    });
+    }, TMP_30.$$arity = 0);
 
     Opal.alias(self, 'to_s', 'inspect');
 
-    Opal.defn(self, '$to_h', function() {
-      var $a, $b, TMP_16, self = this;
+    Opal.defn(self, '$to_h', TMP_32 = function ːto_h() {
+      var $a, $b, TMP_31, self = this;
 
-      return ($a = ($b = self.$members()).$inject, $a.$$p = (TMP_16 = function(h, name){var self = TMP_16.$$s || this;
+      return ($a = ($b = self.$class().$members()).$inject, $a.$$p = (TMP_31 = function(h, name){var self = TMP_31.$$s || this;
 if (h == null) h = nil;if (name == null) name = nil;
       h['$[]='](name, self['$[]'](name));
-        return h;}, TMP_16.$$s = self, TMP_16), $a).call($b, $hash2([], {}));
-    });
+        return h;}, TMP_31.$$s = self, TMP_31.$$arity = 2, TMP_31), $a).call($b, $hash2([], {}));
+    }, TMP_32.$$arity = 0);
 
-    return (Opal.defn(self, '$values_at', function() {
-      var $a, $b, TMP_17, self = this, $splat_index = nil;
+    Opal.defn(self, '$values_at', TMP_34 = function ːvalues_at($a_rest) {
+      var $b, $c, TMP_33, self = this, args;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var args = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        args[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      args = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        args[$arg_idx - 0] = arguments[$arg_idx];
       }
-      args = ($a = ($b = args).$map, $a.$$p = (TMP_17 = function(arg){var self = TMP_17.$$s || this;
+      args = ($b = ($c = args).$map, $b.$$p = (TMP_33 = function(arg){var self = TMP_33.$$s || this;
 if (arg == null) arg = nil;
-      return arg.$$is_range ? arg.$to_a() : arg;}, TMP_17.$$s = self, TMP_17), $a).call($b).$flatten();
+      return arg.$$is_range ? arg.$to_a() : arg;}, TMP_33.$$s = self, TMP_33.$$arity = 1, TMP_33), $b).call($c).$flatten();
       
       var result = [];
       for (var i = 0, len = args.length; i < len; i++) {
@@ -18368,13 +18600,18 @@ if (arg == null) arg = nil;
       }
       return result;
     ;
-    }), nil) && 'values_at';
+    }, TMP_34.$$arity = -1);
+
+    return (Opal.defs(self, '$_load', TMP_35 = function ː_load(args) {
+      var $a, $b, self = this, attributes = nil;
+
+      attributes = ($a = args).$values_at.apply($a, Opal.to_a(self.$members()));
+      return ($b = self).$new.apply($b, Opal.to_a(attributes));
+    }, TMP_35.$$arity = 1), nil) && '_load';
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/io"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var $a, $b, self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $module = Opal.module, $gvars = Opal.gvars;
 
   Opal.add_stubs(['$attr_accessor', '$size', '$write', '$join', '$map', '$String', '$empty?', '$concat', '$chomp', '$getbyte', '$getc', '$raise', '$new', '$write_proc=', '$extend']);
@@ -18382,7 +18619,7 @@ Opal.modules["corelib/io"] = function(Opal) {
     function $IO(){};
     var self = $IO = $klass($base, $super, 'IO', $IO);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4;
 
     def.tty = def.closed = nil;
     Opal.cdecl($scope, 'SEEK_SET', 0);
@@ -18391,120 +18628,120 @@ Opal.modules["corelib/io"] = function(Opal) {
 
     Opal.cdecl($scope, 'SEEK_END', 2);
 
-    Opal.defn(self, '$tty?', function() {
+    Opal.defn(self, '$tty?', TMP_1 = function() {
       var self = this;
 
       return self.tty;
-    });
+    }, TMP_1.$$arity = 0);
 
-    Opal.defn(self, '$closed?', function() {
+    Opal.defn(self, '$closed?', TMP_2 = function() {
       var self = this;
 
       return self.closed;
-    });
+    }, TMP_2.$$arity = 0);
 
     self.$attr_accessor("write_proc");
 
-    Opal.defn(self, '$write', function(string) {
+    Opal.defn(self, '$write', TMP_3 = function ːwrite(string) {
       var self = this;
 
       self.write_proc(string);
       return string.$size();
-    });
+    }, TMP_3.$$arity = 1);
 
     self.$attr_accessor("sync", "tty");
 
-    Opal.defn(self, '$flush', function() {
+    Opal.defn(self, '$flush', TMP_4 = function ːflush() {
       var self = this;
 
       return nil;
-    });
+    }, TMP_4.$$arity = 0);
 
     (function($base) {
       var $Writable, self = $Writable = $module($base, 'Writable');
 
-      var def = self.$$proto, $scope = self.$$scope;
+      var def = self.$$proto, $scope = self.$$scope, TMP_5, TMP_7, TMP_9;
 
-      Opal.defn(self, '$<<', function(string) {
+      Opal.defn(self, '$<<', TMP_5 = function(string) {
         var self = this;
 
         self.$write(string);
         return self;
-      });
+      }, TMP_5.$$arity = 1);
 
-      Opal.defn(self, '$print', function() {
-        var $a, $b, TMP_1, self = this, $splat_index = nil;
+      Opal.defn(self, '$print', TMP_7 = function ːprint($a_rest) {
+        var $b, $c, TMP_6, self = this, args;
         if ($gvars[","] == null) $gvars[","] = nil;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var args = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          args[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
         }
-        self.$write(($a = ($b = args).$map, $a.$$p = (TMP_1 = function(arg){var self = TMP_1.$$s || this;
+        self.$write(($b = ($c = args).$map, $b.$$p = (TMP_6 = function(arg){var self = TMP_6.$$s || this;
 if (arg == null) arg = nil;
-        return self.$String(arg)}, TMP_1.$$s = self, TMP_1), $a).call($b).$join($gvars[","]));
+        return self.$String(arg)}, TMP_6.$$s = self, TMP_6.$$arity = 1, TMP_6), $b).call($c).$join($gvars[","]));
         return nil;
-      });
+      }, TMP_7.$$arity = -1);
 
-      Opal.defn(self, '$puts', function() {
-        var $a, $b, TMP_2, self = this, newline = nil, $splat_index = nil;
+      Opal.defn(self, '$puts', TMP_9 = function ːputs($a_rest) {
+        var $b, $c, TMP_8, self = this, args, newline = nil;
         if ($gvars["/"] == null) $gvars["/"] = nil;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var args = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          args[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        args = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          args[$arg_idx - 0] = arguments[$arg_idx];
         }
         newline = $gvars["/"];
-        if ((($a = args['$empty?']()) !== nil && (!$a.$$is_boolean || $a == true))) {
+        if ((($b = args['$empty?']()) !== nil && $b != null && (!$b.$$is_boolean || $b == true))) {
           self.$write($gvars["/"])
           } else {
-          self.$write(($a = ($b = args).$map, $a.$$p = (TMP_2 = function(arg){var self = TMP_2.$$s || this;
+          self.$write(($b = ($c = args).$map, $b.$$p = (TMP_8 = function(arg){var self = TMP_8.$$s || this;
 if (arg == null) arg = nil;
-          return self.$String(arg).$chomp()}, TMP_2.$$s = self, TMP_2), $a).call($b).$concat([nil]).$join(newline))
+          return self.$String(arg).$chomp()}, TMP_8.$$s = self, TMP_8.$$arity = 1, TMP_8), $b).call($c).$concat([nil]).$join(newline))
         };
         return nil;
-      });
+      }, TMP_9.$$arity = -1);
     })($scope.base);
 
     return (function($base) {
       var $Readable, self = $Readable = $module($base, 'Readable');
 
-      var def = self.$$proto, $scope = self.$$scope;
+      var def = self.$$proto, $scope = self.$$scope, TMP_10, TMP_11, TMP_12, TMP_13;
 
-      Opal.defn(self, '$readbyte', function() {
+      Opal.defn(self, '$readbyte', TMP_10 = function ːreadbyte() {
         var self = this;
 
         return self.$getbyte();
-      });
+      }, TMP_10.$$arity = 0);
 
-      Opal.defn(self, '$readchar', function() {
+      Opal.defn(self, '$readchar', TMP_11 = function ːreadchar() {
         var self = this;
 
         return self.$getc();
-      });
+      }, TMP_11.$$arity = 0);
 
-      Opal.defn(self, '$readline', function(sep) {
+      Opal.defn(self, '$readline', TMP_12 = function ːreadline(sep) {
         var self = this;
         if ($gvars["/"] == null) $gvars["/"] = nil;
 
         if (sep == null) {
-          sep = $gvars["/"]
+          sep = $gvars["/"];
         }
         return self.$raise($scope.get('NotImplementedError'));
-      });
+      }, TMP_12.$$arity = -1);
 
-      Opal.defn(self, '$readpartial', function(integer, outbuf) {
+      Opal.defn(self, '$readpartial', TMP_13 = function ːreadpartial(integer, outbuf) {
         var self = this;
 
         if (outbuf == null) {
-          outbuf = nil
+          outbuf = nil;
         }
         return self.$raise($scope.get('NotImplementedError'));
-      });
+      }, TMP_13.$$arity = -2);
     })($scope.base);
   })($scope.base, null);
   Opal.cdecl($scope, 'STDERR', $gvars.stderr = $scope.get('IO').$new());
@@ -18515,28 +18752,24 @@ if (arg == null) arg = nil;
   $scope.get('STDOUT').$extend((($scope.get('IO')).$$scope.get('Writable')));
   return $scope.get('STDERR').$extend((($scope.get('IO')).$$scope.get('Writable')));
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/main"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
-  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
+  var TMP_1, TMP_2, self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
 
   Opal.add_stubs(['$include']);
-  Opal.defs(self, '$to_s', function() {
+  Opal.defs(self, '$to_s', TMP_1 = function ːto_s() {
     var self = this;
 
     return "main";
-  });
-  return (Opal.defs(self, '$include', function(mod) {
+  }, TMP_1.$$arity = 0);
+  return (Opal.defs(self, '$include', TMP_2 = function ːinclude(mod) {
     var self = this;
 
     return $scope.get('Object').$include(mod);
-  }), nil) && 'include';
+  }, TMP_2.$$arity = 1), nil) && 'include';
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/dir"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$[]']);
@@ -18547,41 +18780,45 @@ Opal.modules["corelib/dir"] = function(Opal) {
     var def = self.$$proto, $scope = self.$$scope;
 
     return (function(self) {
-      var $scope = self.$$scope, def = self.$$proto, TMP_1;
+      var $scope = self.$$scope, def = self.$$proto, TMP_1, TMP_2, TMP_3;
 
-      Opal.defn(self, '$chdir', TMP_1 = function(dir) {
-        var $a, self = this, $iter = TMP_1.$$p, $yield = $iter || nil, prev_cwd = nil;
+      Opal.defn(self, '$chdir', TMP_1 = function ːchdir(dir) {
+        var self = this, $iter = TMP_1.$$p, $yield = $iter || nil, prev_cwd = nil;
 
         TMP_1.$$p = null;
         try {
         prev_cwd = Opal.current_dir;
         Opal.current_dir = dir;
-        return $a = Opal.yieldX($yield, []), $a === $breaker ? $a : $a;
+        return Opal.yieldX($yield, []);;
         } finally {
-        Opal.current_dir = prev_cwd;
+          Opal.current_dir = prev_cwd;
         };
-      });
-      Opal.defn(self, '$pwd', function() {
+      }, TMP_1.$$arity = 1);
+      Opal.defn(self, '$pwd', TMP_2 = function ːpwd() {
         var self = this;
 
         return Opal.current_dir || '.';
-      });
+      }, TMP_2.$$arity = 0);
       Opal.alias(self, 'getwd', 'pwd');
-      return (Opal.defn(self, '$home', function() {
+      return (Opal.defn(self, '$home', TMP_3 = function ːhome() {
         var $a, self = this;
 
-        return ((($a = $scope.get('ENV')['$[]']("HOME")) !== false && $a !== nil) ? $a : ".");
-      }), nil) && 'home';
+        return ((($a = $scope.get('ENV')['$[]']("HOME")) !== false && $a !== nil && $a != null) ? $a : ".");
+      }, TMP_3.$$arity = 0), nil) && 'home';
     })(Opal.get_singleton_class(self))
   })($scope.base, null)
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/file"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
+  function $rb_plus(lhs, rhs) {
+    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs + rhs : lhs['$+'](rhs);
+  }
+  function $rb_minus(lhs, rhs) {
+    return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs - rhs : lhs['$-'](rhs);
+  }
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $range = Opal.range;
 
-  Opal.add_stubs(['$join', '$compact', '$split', '$==', '$first', '$[]=', '$home', '$each', '$pop', '$<<', '$[]', '$gsub', '$find', '$=~']);
+  Opal.add_stubs(['$join', '$compact', '$split', '$==', '$first', '$[]=', '$home', '$pwd', '$each', '$pop', '$<<', '$raise', '$respond_to?', '$to_path', '$class', '$nil?', '$is_a?', '$basename', '$empty?', '$rindex', '$[]', '$+', '$-', '$length', '$gsub', '$find', '$=~']);
   return (function($base, $super) {
     function $File(){};
     var self = $File = $klass($base, $super, 'File', $File);
@@ -18594,48 +18831,267 @@ Opal.modules["corelib/file"] = function(Opal) {
 
     Opal.cdecl($scope, 'PATH_SEPARATOR', ":");
 
-    return (function(self) {
-      var $scope = self.$$scope, def = self.$$proto;
+    Opal.cdecl($scope, 'FNM_SYSCASE', 0);
 
-      Opal.defn(self, '$expand_path', function(path, basedir) {
+    return (function(self) {
+      var $scope = self.$$scope, def = self.$$proto, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_8, TMP_9, TMP_10;
+
+      Opal.defn(self, '$expand_path', TMP_2 = function ːexpand_path(path, basedir) {
         var $a, $b, TMP_1, self = this, parts = nil, new_parts = nil;
 
         if (basedir == null) {
-          basedir = nil
+          basedir = nil;
         }
         path = [basedir, path].$compact().$join($scope.get('SEPARATOR'));
         parts = path.$split($scope.get('SEPARATOR'));
         new_parts = [];
         if (parts.$first()['$==']("~")) {
           parts['$[]='](0, $scope.get('Dir').$home())};
+        if (parts.$first()['$=='](".")) {
+          parts['$[]='](0, $scope.get('Dir').$pwd())};
         ($a = ($b = parts).$each, $a.$$p = (TMP_1 = function(part){var self = TMP_1.$$s || this;
 if (part == null) part = nil;
         if (part['$==']("..")) {
             return new_parts.$pop()
             } else {
             return new_parts['$<<'](part)
-          }}, TMP_1.$$s = self, TMP_1), $a).call($b);
+          }}, TMP_1.$$s = self, TMP_1.$$arity = 1, TMP_1), $a).call($b);
         return new_parts.$join($scope.get('SEPARATOR'));
-      });
+      }, TMP_2.$$arity = -2);
       Opal.alias(self, 'realpath', 'expand_path');
-      Opal.defn(self, '$dirname', function(path) {
+      
+      function chompdirsep(path) {
+        var last;
+
+        while (path.length > 0) {
+          if (isDirSep(path)) {
+            last = path;
+            path = path.substring(1, path.length);
+            while (path.length > 0 && isDirSep(path)) {
+              path = inc(path);
+            }
+            if (path.length == 0) {
+              return last;
+            }
+          }
+          else {
+            path = inc(path);
+          }
+        }
+        return path;
+      }
+
+      function inc(a) {
+        return a.substring(1, a.length);
+      }
+
+      function skipprefix(path) {
+        return path;
+      }
+
+      function lastSeparator(path) {
+        var tmp, last;
+
+        while (path.length > 0) {
+          if (isDirSep(path)) {
+            tmp = path;
+            path = inc(path);
+
+            while (path.length > 0 && isDirSep(path)) {
+              path = inc(path);
+            }
+            if (!path) {
+              break;
+            }
+            last = tmp;
+          }
+          else {
+            path = inc(path);
+          }
+        }
+
+        return last;
+      }
+
+      function isDirSep(sep) {
+        return sep.charAt(0) === $scope.get('SEPARATOR');
+      }
+
+      function skipRoot(path) {
+        while (path.length > 0 && isDirSep(path)) {
+          path = inc(path);
+        }
+        return path;
+      }
+
+      function pointerSubtract(a, b) {
+        if (a.length == 0) {
+          return b.length;
+        }
+        return b.indexOf(a);
+      }
+
+      function handleSuffix(n, f, p, suffix, name, origName) {
+        var suffixMatch;
+
+        if (n >= 0) {
+          if (suffix === nil) {
+            f = n;
+          }
+          else {
+            suffixMatch = suffix === '.*' ? '\\.\\w+' : suffix.replace(/\?/g, '\\?');
+            suffixMatch = new RegExp(suffixMatch + $scope.get('Separator') + '*$').exec(p);
+            if (suffixMatch) {
+              f = suffixMatch.index;
+            }
+            else {
+              f = n;
+            }
+          }
+
+          if (f === origName.length) {
+            return name;
+          }
+        }
+
+        return p.substring(0, f);
+      }
+    
+      Opal.defn(self, '$dirname', TMP_3 = function ːdirname(path) {
         var self = this;
 
-        return self.$split(path)['$[]']($range(0, -2, false));
-      });
-      Opal.defn(self, '$basename', function(path) {
+        
+        if (path === nil) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of nil into String")
+        }
+        if (path['$respond_to?']("to_path")) {
+          path = path.$to_path();
+        }
+        if (!path.$$is_string) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of " + (path.$class()) + " into String")
+        }
+
+        var root, p;
+
+        root = skipRoot(path);
+
+        // if (root > name + 1) in the C code
+        if (root.length == 0) {
+          path = path.substring(path.length - 1, path.length);
+        }
+        else if (root.length - path.length < 0) {
+          path = path.substring(path.indexOf(root)-1, path.length);
+        }
+
+        p = lastSeparator(root);
+        if (!p) {
+          p = root;
+        }
+        if (p === path) {
+          return '.';
+        }
+        return path.substring(0, path.length - p.length);
+      ;
+      }, TMP_3.$$arity = 1);
+      Opal.defn(self, '$basename', TMP_4 = function ːbasename(name, suffix) {
         var self = this;
 
-        return self.$split(path)['$[]'](-1);
-      });
-      Opal.defn(self, '$exist?', function(path) {
+        if (suffix == null) {
+          suffix = nil;
+        }
+        
+        var p, q, e, f = 0, n = -1, tmp, pointerMath, origName;
+
+        if (name === nil) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of nil into String")
+        }
+        if (name['$respond_to?']("to_path")) {
+          name = name.$to_path();
+        }
+        if (!name.$$is_string) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of " + (name.$class()) + " into String")
+        }
+        if (suffix !== nil && !suffix.$$is_string) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of " + (suffix.$class()) + " into String")
+        }
+
+        if (name.length == 0) {
+          return name;
+        }
+
+        origName = name;
+        name = skipprefix(name);
+
+        while (isDirSep(name)) {
+          tmp = name;
+          name = inc(name);
+        }
+
+        if (!name) {
+          p = tmp;
+          f = 1;
+        }
+        else {
+          if (!(p = lastSeparator(name))) {
+            p = name;
+          }
+          else {
+            while (isDirSep(p)) {
+              p = inc(p);
+            }
+          }
+
+          n = pointerSubtract(chompdirsep(p), p);
+
+          for (q = p; pointerSubtract(q, p) < n && q.charAt(0) === '.'; q = inc(q)) {
+          }
+
+          for (e = null; pointerSubtract(q, p) < n; q = inc(q)) {
+            if (q.charAt(0) === '.') {
+              e = q;
+            }
+          }
+
+          if (e) {
+            f = pointerSubtract(e, p);
+          }
+          else {
+            f = n;
+          }
+        }
+
+        return handleSuffix(n, f, p, suffix, name, origName);
+      ;
+      }, TMP_4.$$arity = -2);
+      Opal.defn(self, '$extname', TMP_5 = function ːextname(path) {
+        var $a, $b, self = this, filename = nil, last_dot_idx = nil;
+
+        if ((($a = path['$nil?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of nil into String")};
+        if ((($a = path['$respond_to?']("to_path")) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          path = path.$to_path()};
+        if ((($a = path['$is_a?']($scope.get('String'))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          } else {
+          self.$raise($scope.get('TypeError'), "no implicit conversion of " + (path.$class()) + " into String")
+        };
+        filename = self.$basename(path);
+        if ((($a = filename['$empty?']()) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          return ""};
+        last_dot_idx = filename['$[]']($range(1, -1, false)).$rindex(".");
+        if ((($a = (((($b = last_dot_idx['$nil?']()) !== false && $b !== nil && $b != null) ? $b : $rb_plus(last_dot_idx, 1)['$==']($rb_minus(filename.$length(), 1))))) !== nil && $a != null && (!$a.$$is_boolean || $a == true))) {
+          return ""
+          } else {
+          return filename['$[]']($range(($rb_plus(last_dot_idx, 1)), -1, false))
+        };
+      }, TMP_5.$$arity = 1);
+      Opal.defn(self, '$exist?', TMP_6 = function(path) {
         var self = this;
 
         return Opal.modules[path] != null;
-      });
+      }, TMP_6.$$arity = 1);
       Opal.alias(self, 'exists?', 'exist?');
-      Opal.defn(self, '$directory?', function(path) {
-        var $a, $b, TMP_2, self = this, files = nil, file = nil;
+      Opal.defn(self, '$directory?', TMP_8 = function(path) {
+        var $a, $b, TMP_7, self = this, files = nil, file = nil;
 
         files = [];
         
@@ -18644,34 +19100,32 @@ if (part == null) part = nil;
         }
       ;
         path = path.$gsub((new RegExp("(^." + $scope.get('SEPARATOR') + "+|" + $scope.get('SEPARATOR') + "+$)")));
-        file = ($a = ($b = files).$find, $a.$$p = (TMP_2 = function(file){var self = TMP_2.$$s || this;
+        file = ($a = ($b = files).$find, $a.$$p = (TMP_7 = function(file){var self = TMP_7.$$s || this;
 if (file == null) file = nil;
-        return file['$=~']((new RegExp("^" + path)))}, TMP_2.$$s = self, TMP_2), $a).call($b);
+        return file['$=~']((new RegExp("^" + path)))}, TMP_7.$$s = self, TMP_7.$$arity = 1, TMP_7), $a).call($b);
         return file;
-      });
-      Opal.defn(self, '$join', function() {
-        var self = this, $splat_index = nil;
+      }, TMP_8.$$arity = 1);
+      Opal.defn(self, '$join', TMP_9 = function ːjoin($a_rest) {
+        var self = this, paths;
 
-        var array_size = arguments.length - 0;
-        if(array_size < 0) array_size = 0;
-        var paths = new Array(array_size);
-        for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-          paths[$splat_index] = arguments[$splat_index + 0];
+        var $args_len = arguments.length, $rest_len = $args_len - 0;
+        if ($rest_len < 0) { $rest_len = 0; }
+        paths = new Array($rest_len);
+        for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+          paths[$arg_idx - 0] = arguments[$arg_idx];
         }
         return paths.$join($scope.get('SEPARATOR')).$gsub((new RegExp("" + $scope.get('SEPARATOR') + "+")), $scope.get('SEPARATOR'));
-      });
-      return (Opal.defn(self, '$split', function(path) {
+      }, TMP_9.$$arity = -1);
+      return (Opal.defn(self, '$split', TMP_10 = function ːsplit(path) {
         var self = this;
 
         return path.$split($scope.get('SEPARATOR'));
-      }), nil) && 'split';
+      }, TMP_10.$$arity = 1), nil) && 'split';
     })(Opal.get_singleton_class(self));
   })($scope.base, $scope.get('IO'))
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/process"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass;
 
   Opal.add_stubs(['$to_f', '$now', '$new']);
@@ -18679,68 +19133,79 @@ Opal.modules["corelib/process"] = function(Opal) {
     function $Process(){};
     var self = $Process = $klass($base, $super, 'Process', $Process);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3;
 
     Opal.cdecl($scope, 'CLOCK_REALTIME', 0);
 
     Opal.cdecl($scope, 'CLOCK_MONOTONIC', 1);
 
-    Opal.defs(self, '$pid', function() {
+    Opal.defs(self, '$pid', TMP_1 = function ːpid() {
       var self = this;
 
       return 0;
-    });
+    }, TMP_1.$$arity = 0);
 
-    Opal.defs(self, '$times', function() {
+    Opal.defs(self, '$times', TMP_2 = function ːtimes() {
       var self = this, t = nil;
 
       t = $scope.get('Time').$now().$to_f();
       return (($scope.get('Benchmark')).$$scope.get('Tms')).$new(t, t, t, t, t);
-    });
+    }, TMP_2.$$arity = 0);
 
-    return (Opal.defs(self, '$clock_gettime', function(clock_id, unit) {
+    return (Opal.defs(self, '$clock_gettime', TMP_3 = function ːclock_gettime(clock_id, unit) {
       var self = this;
 
       if (unit == null) {
-        unit = nil
+        unit = nil;
       }
       return $scope.get('Time').$now().$to_f();
-    }), nil) && 'clock_gettime';
+    }, TMP_3.$$arity = -2), nil) && 'clock_gettime';
   })($scope.base, null);
   (function($base, $super) {
     function $Signal(){};
     var self = $Signal = $klass($base, $super, 'Signal', $Signal);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_4;
 
-    return (Opal.defs(self, '$trap', function() {
+    return (Opal.defs(self, '$trap', TMP_4 = function ːtrap($a_rest) {
       var self = this;
 
       return nil;
-    }), nil) && 'trap'
+    }, TMP_4.$$arity = -1), nil) && 'trap'
   })($scope.base, null);
   return (function($base, $super) {
     function $GC(){};
     var self = $GC = $klass($base, $super, 'GC', $GC);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_5;
 
-    return (Opal.defs(self, '$start', function() {
+    return (Opal.defs(self, '$start', TMP_5 = function ːstart() {
       var self = this;
 
       return nil;
-    }), nil) && 'start'
+    }, TMP_5.$$arity = 0), nil) && 'start'
   })($scope.base, null);
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 Opal.modules["corelib/unsupported"] = function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
-  var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $module = Opal.module;
+  var TMP_30, TMP_31, self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice, $klass = Opal.klass, $module = Opal.module;
 
-  Opal.add_stubs(['$warn', '$raise', '$%', '$module_function']);
+  Opal.add_stubs(['$raise', '$warn', '$%']);
   
   var warnings = {};
+
+  function handle_unsupported_feature(message) {
+    switch (Opal.config.unsupported_features_severity) {
+    case 'error':
+      $scope.get('Kernel').$raise($scope.get('NotImplementedError'), message)
+      break;
+    case 'warning':
+      warn(message)
+      break;
+    default: // ignore
+      // noop
+    }
+  }
 
   function warn(string) {
     if (warnings[string]) {
@@ -18755,228 +19220,181 @@ Opal.modules["corelib/unsupported"] = function(Opal) {
     function $String(){};
     var self = $String = $klass($base, $super, 'String', $String);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_1, TMP_2, TMP_3, TMP_4, TMP_5, TMP_6, TMP_7, TMP_8, TMP_9, TMP_10, TMP_11, TMP_12, TMP_13, TMP_14, TMP_15, TMP_16, TMP_17, TMP_18;
 
     var ERROR = "String#%s not supported. Mutable String methods are not supported in Opal.";
 
-    Opal.defn(self, '$<<', function() {
+    Opal.defn(self, '$<<', TMP_1 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("<<"));
-    });
+    }, TMP_1.$$arity = -1);
 
-    Opal.defn(self, '$capitalize!', function() {
+    Opal.defn(self, '$capitalize!', TMP_2 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("capitalize!"));
-    });
+    }, TMP_2.$$arity = -1);
 
-    Opal.defn(self, '$chomp!', function() {
+    Opal.defn(self, '$chomp!', TMP_3 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("chomp!"));
-    });
+    }, TMP_3.$$arity = -1);
 
-    Opal.defn(self, '$chop!', function() {
+    Opal.defn(self, '$chop!', TMP_4 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("chop!"));
-    });
+    }, TMP_4.$$arity = -1);
 
-    Opal.defn(self, '$downcase!', function() {
+    Opal.defn(self, '$downcase!', TMP_5 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("downcase!"));
-    });
+    }, TMP_5.$$arity = -1);
 
-    Opal.defn(self, '$gsub!', function() {
+    Opal.defn(self, '$gsub!', TMP_6 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("gsub!"));
-    });
+    }, TMP_6.$$arity = -1);
 
-    Opal.defn(self, '$lstrip!', function() {
+    Opal.defn(self, '$lstrip!', TMP_7 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("lstrip!"));
-    });
+    }, TMP_7.$$arity = -1);
 
-    Opal.defn(self, '$next!', function() {
+    Opal.defn(self, '$next!', TMP_8 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("next!"));
-    });
+    }, TMP_8.$$arity = -1);
 
-    Opal.defn(self, '$reverse!', function() {
+    Opal.defn(self, '$reverse!', TMP_9 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("reverse!"));
-    });
+    }, TMP_9.$$arity = -1);
 
-    Opal.defn(self, '$slice!', function() {
+    Opal.defn(self, '$slice!', TMP_10 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("slice!"));
-    });
+    }, TMP_10.$$arity = -1);
 
-    Opal.defn(self, '$squeeze!', function() {
+    Opal.defn(self, '$squeeze!', TMP_11 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("squeeze!"));
-    });
+    }, TMP_11.$$arity = -1);
 
-    Opal.defn(self, '$strip!', function() {
+    Opal.defn(self, '$strip!', TMP_12 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("strip!"));
-    });
+    }, TMP_12.$$arity = -1);
 
-    Opal.defn(self, '$sub!', function() {
+    Opal.defn(self, '$sub!', TMP_13 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("sub!"));
-    });
+    }, TMP_13.$$arity = -1);
 
-    Opal.defn(self, '$succ!', function() {
+    Opal.defn(self, '$succ!', TMP_14 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("succ!"));
-    });
+    }, TMP_14.$$arity = -1);
 
-    Opal.defn(self, '$swapcase!', function() {
+    Opal.defn(self, '$swapcase!', TMP_15 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("swapcase!"));
-    });
+    }, TMP_15.$$arity = -1);
 
-    Opal.defn(self, '$tr!', function() {
+    Opal.defn(self, '$tr!', TMP_16 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("tr!"));
-    });
+    }, TMP_16.$$arity = -1);
 
-    Opal.defn(self, '$tr_s!', function() {
+    Opal.defn(self, '$tr_s!', TMP_17 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("tr_s!"));
-    });
+    }, TMP_17.$$arity = -1);
 
-    return (Opal.defn(self, '$upcase!', function() {
+    return (Opal.defn(self, '$upcase!', TMP_18 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), (ERROR)['$%']("upcase!"));
-    }), nil) && 'upcase!';
+    }, TMP_18.$$arity = -1), nil) && 'upcase!';
   })($scope.base, null);
   (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_19, TMP_20;
 
     var ERROR = "Object freezing is not supported by Opal";
 
-    Opal.defn(self, '$freeze', function() {
-      var $a, self = this;
+    Opal.defn(self, '$freeze', TMP_19 = function ːfreeze() {
+      var self = this;
 
-      if ((($a = OPAL_CONFIG.freezing) !== nil && (!$a.$$is_boolean || $a == true))) {
-        warn(ERROR);
-        } else {
-        self.$raise($scope.get('NotImplementedError'), ERROR)
-      };
+      handle_unsupported_feature(ERROR);
       return self;
-    });
+    }, TMP_19.$$arity = 0);
 
-    Opal.defn(self, '$frozen?', function() {
-      var $a, self = this;
+    Opal.defn(self, '$frozen?', TMP_20 = function() {
+      var self = this;
 
-      if ((($a = OPAL_CONFIG.freezing) !== nil && (!$a.$$is_boolean || $a == true))) {
-        warn(ERROR);
-        } else {
-        self.$raise($scope.get('NotImplementedError'), ERROR)
-      };
+      handle_unsupported_feature(ERROR);
       return false;
-    });
+    }, TMP_20.$$arity = 0);
   })($scope.base);
   (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_21, TMP_22, TMP_23;
 
     var ERROR = "Object tainting is not supported by Opal";
 
-    Opal.defn(self, '$taint', function() {
-      var $a, self = this;
+    Opal.defn(self, '$taint', TMP_21 = function ːtaint() {
+      var self = this;
 
-      if ((($a = OPAL_CONFIG.tainting) !== nil && (!$a.$$is_boolean || $a == true))) {
-        warn(ERROR);
-        } else {
-        self.$raise($scope.get('NotImplementedError'), ERROR)
-      };
+      handle_unsupported_feature(ERROR);
       return self;
-    });
+    }, TMP_21.$$arity = 0);
 
-    Opal.defn(self, '$untaint', function() {
-      var $a, self = this;
+    Opal.defn(self, '$untaint', TMP_22 = function ːuntaint() {
+      var self = this;
 
-      if ((($a = OPAL_CONFIG.tainting) !== nil && (!$a.$$is_boolean || $a == true))) {
-        warn(ERROR);
-        } else {
-        self.$raise($scope.get('NotImplementedError'), ERROR)
-      };
+      handle_unsupported_feature(ERROR);
       return self;
-    });
+    }, TMP_22.$$arity = 0);
 
-    Opal.defn(self, '$tainted?', function() {
-      var $a, self = this;
+    Opal.defn(self, '$tainted?', TMP_23 = function() {
+      var self = this;
 
-      if ((($a = OPAL_CONFIG.tainting) !== nil && (!$a.$$is_boolean || $a == true))) {
-        warn(ERROR);
-        } else {
-        self.$raise($scope.get('NotImplementedError'), ERROR)
-      };
+      handle_unsupported_feature(ERROR);
       return false;
-    });
-  })($scope.base);
-  (function($base) {
-    var $Marshal, self = $Marshal = $module($base, 'Marshal');
-
-    var def = self.$$proto, $scope = self.$$scope;
-
-    var ERROR = "Marshalling is not supported by Opal";
-
-    self.$module_function();
-
-    Opal.defn(self, '$dump', function() {
-      var self = this;
-
-      return self.$raise($scope.get('NotImplementedError'), ERROR);
-    });
-
-    Opal.defn(self, '$load', function() {
-      var self = this;
-
-      return self.$raise($scope.get('NotImplementedError'), ERROR);
-    });
-
-    Opal.defn(self, '$restore', function() {
-      var self = this;
-
-      return self.$raise($scope.get('NotImplementedError'), ERROR);
-    });
+    }, TMP_23.$$arity = 0);
   })($scope.base);
   (function($base, $super) {
     function $Module(){};
     var self = $Module = $klass($base, $super, 'Module', $Module);
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_24, TMP_25, TMP_26, TMP_27;
 
-    Opal.defn(self, '$public', function() {
-      var self = this, $splat_index = nil;
+    Opal.defn(self, '$public', TMP_24 = function($a_rest) {
+      var self = this, methods;
 
-      var array_size = arguments.length - 0;
-      if(array_size < 0) array_size = 0;
-      var methods = new Array(array_size);
-      for($splat_index = 0; $splat_index < array_size; $splat_index++) {
-        methods[$splat_index] = arguments[$splat_index + 0];
+      var $args_len = arguments.length, $rest_len = $args_len - 0;
+      if ($rest_len < 0) { $rest_len = 0; }
+      methods = new Array($rest_len);
+      for (var $arg_idx = 0; $arg_idx < $args_len; $arg_idx++) {
+        methods[$arg_idx - 0] = arguments[$arg_idx];
       }
       
       if (methods.length === 0) {
@@ -18985,7 +19403,7 @@ Opal.modules["corelib/unsupported"] = function(Opal) {
 
       return nil;
     
-    });
+    }, TMP_24.$$arity = -1);
 
     Opal.alias(self, 'private', 'public');
 
@@ -18993,25 +19411,25 @@ Opal.modules["corelib/unsupported"] = function(Opal) {
 
     Opal.alias(self, 'nesting', 'public');
 
-    Opal.defn(self, '$private_class_method', function() {
+    Opal.defn(self, '$private_class_method', TMP_25 = function ːprivate_class_method($a_rest) {
       var self = this;
 
       return self;
-    });
+    }, TMP_25.$$arity = -1);
 
     Opal.alias(self, 'public_class_method', 'private_class_method');
 
-    Opal.defn(self, '$private_method_defined?', function(obj) {
+    Opal.defn(self, '$private_method_defined?', TMP_26 = function(obj) {
       var self = this;
 
       return false;
-    });
+    }, TMP_26.$$arity = 1);
 
-    Opal.defn(self, '$private_constant', function() {
+    Opal.defn(self, '$private_constant', TMP_27 = function ːprivate_constant($a_rest) {
       var self = this;
 
       return nil;
-    });
+    }, TMP_27.$$arity = -1);
 
     Opal.alias(self, 'protected_method_defined?', 'private_method_defined?');
 
@@ -19022,38 +19440,45 @@ Opal.modules["corelib/unsupported"] = function(Opal) {
   (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_28;
 
-    Opal.defn(self, '$private_methods', function() {
+    Opal.defn(self, '$private_methods', TMP_28 = function ːprivate_methods($a_rest) {
       var self = this;
 
       return [];
-    });
+    }, TMP_28.$$arity = -1);
 
     Opal.alias(self, 'private_instance_methods', 'private_methods');
   })($scope.base);
-  return (function($base) {
+  (function($base) {
     var $Kernel, self = $Kernel = $module($base, 'Kernel');
 
-    var def = self.$$proto, $scope = self.$$scope;
+    var def = self.$$proto, $scope = self.$$scope, TMP_29;
 
-    Opal.defn(self, '$eval', function() {
+    Opal.defn(self, '$eval', TMP_29 = function($a_rest) {
       var self = this;
 
       return self.$raise($scope.get('NotImplementedError'), "To use Kernel#eval, you must first require 'opal-parser'. " + ("See https://github.com/opal/opal/blob/" + ($scope.get('RUBY_ENGINE_VERSION')) + "/docs/opal_parser.md for details."));
-    })
+    }, TMP_29.$$arity = -1)
   })($scope.base);
+  Opal.defs(self, '$public', TMP_30 = function($a_rest) {
+    var self = this;
+
+    return nil;
+  }, TMP_30.$$arity = -1);
+  return (Opal.defs(self, '$private', TMP_31 = function($a_rest) {
+    var self = this;
+
+    return nil;
+  }, TMP_31.$$arity = -1), nil) && 'private';
 };
-/* Generated by Opal 0.9.2 */
+/* Generated by Opal 0.10.1 */
 (function(Opal) {
-  Opal.dynamic_require_severity = "warning";
-  var OPAL_CONFIG = { method_missing: true, arity_check: false, freezing: true, tainting: true };
   var self = Opal.top, $scope = Opal, nil = Opal.nil, $breaker = Opal.breaker, $slice = Opal.slice;
 
   Opal.add_stubs(['$require']);
   self.$require("opal/base");
   self.$require("opal/mini");
-  self.$require("corelib/array/inheritance");
   self.$require("corelib/string/inheritance");
   self.$require("corelib/string/encoding");
   self.$require("corelib/math");
