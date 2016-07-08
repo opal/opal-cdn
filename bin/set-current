@@ -1,0 +1,23 @@
+#!/usr/bin/env ruby
+
+require 'fileutils'
+require 'pathname'
+
+include FileUtils
+
+def sh *args
+  args = args.map(&:to_s)
+  system *args or raise "command failed: #{args}"
+end
+
+def git *args
+  sh 'git', *args
+end
+
+root = Pathname("#{__dir__}/..").expand_path
+opal = Pathname(ENV['OPAL_REPO'] || root.join('tmp/opal')).expand_path
+version = ARGV.first or raise "missing version, usage: bin/set-current 0.10.0"
+
+rm_rf root.join('opal/current')
+cp_r root.join("opal/#{version}"), root.join('opal/current')
+
