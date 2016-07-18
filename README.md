@@ -8,8 +8,8 @@
 
 Where `<VERSION>` is the desired version number or `current`, examples:
 
-    //cdn.opalrb.org/opal/0.6.2/opal.js
-    //cdn.opalrb.org/opal/0.5.5/date.min.js
+    //cdn.opalrb.org/opal/0.10.1/opal.js
+    //cdn.opalrb.org/opal/0.9.4/date.min.js
     //cdn.opalrb.org/opal/current/base64.min.js.gz
 
 
@@ -22,6 +22,8 @@ Where `<VERSION>` is the desired version number or `current`, examples:
   <script src="http://cdn.opalrb.org/opal/current/opal.min.js"></script>
   <script src="http://cdn.opalrb.org/opal/current/native.min.js"></script>
   <script src="http://cdn.opalrb.org/opal/current/opal-parser.min.js"></script>
+  <script type="text/javascript">Opal.load('opal-parser')</script>
+  <script type="text/javascript">Opal.load('native')</script>
 </head>
 <body>
   <script type="text/ruby">
@@ -45,8 +47,8 @@ Where `<VERSION>` is the desired version number or `current`, examples:
 
 <p>Where <code>&lt;VERSION&gt;</code> is the desired version number or <code>current</code>, examples:</p>
 
-<pre><code>//cdn.opalrb.org/opal/0.6.2/opal.js
-//cdn.opalrb.org/opal/0.5.5/date.min.js
+<pre><code>//cdn.opalrb.org/opal/0.10.1/opal.js
+//cdn.opalrb.org/opal/0.9.4/date.min.js
 //cdn.opalrb.org/opal/current/base64.min.js.gz
 </code></pre>
 
