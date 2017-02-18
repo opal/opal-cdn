@@ -81,5 +81,5 @@ From the `opal` dir, assuming there's a checkout of the `gh-pages` branch of `op
 
 ## License
 
-See [http://opalrb.org](http://example.com/).
+See [http://opalrb.org](http://opalrb.org).
 
