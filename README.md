@@ -2,15 +2,15 @@
 
 ## URL scheme
 
-    //cdn.opalrb.org/opal/<VERSION>/opal.js
-    //cdn.opalrb.org/opal/<VERSION>/opal.min.js
-    //cdn.opalrb.org/opal/<VERSION>/opal.min.js.gz
+    //cdn.opalrb.com/opal/<VERSION>/opal.js
+    //cdn.opalrb.com/opal/<VERSION>/opal.min.js
+    //cdn.opalrb.com/opal/<VERSION>/opal.min.js.gz
 
 Where `<VERSION>` is the desired version number or `current`, examples:
 
-    //cdn.opalrb.org/opal/0.10.1/opal.js
-    //cdn.opalrb.org/opal/0.9.4/date.min.js
-    //cdn.opalrb.org/opal/current/base64.min.js.gz
+    //cdn.opalrb.com/opal/0.10.1/opal.js
+    //cdn.opalrb.com/opal/0.9.4/date.min.js
+    //cdn.opalrb.com/opal/current/base64.min.js.gz
 
 
 ## Embedding in your HTML
@@ -19,9 +19,9 @@ Where `<VERSION>` is the desired version number or `current`, examples:
 <!doctype html>
 <html>
 <head>
-  <script src="http://cdn.opalrb.org/opal/current/opal.min.js"></script>
-  <script src="http://cdn.opalrb.org/opal/current/native.min.js"></script>
-  <script src="http://cdn.opalrb.org/opal/current/opal-parser.min.js"></script>
+  <script src="http://cdn.opalrb.com/opal/current/opal.min.js"></script>
+  <script src="http://cdn.opalrb.com/opal/current/native.min.js"></script>
+  <script src="http://cdn.opalrb.com/opal/current/opal-parser.min.js"></script>
   <script type="text/javascript">Opal.load('opal-parser')</script>
   <script type="text/javascript">Opal.load('native')</script>
 </head>
@@ -40,21 +40,21 @@ Where `<VERSION>` is the desired version number or `current`, examples:
 
 <h2 id="url_scheme">URL scheme</h2>
 
-<pre><code>//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.js
-//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.min.js
-//cdn.opalrb.org/opal/&lt;VERSION&gt;/opal.min.js.gz
+<pre><code>//cdn.opalrb.com/opal/&lt;VERSION&gt;/opal.js
+//cdn.opalrb.com/opal/&lt;VERSION&gt;/opal.min.js
+//cdn.opalrb.com/opal/&lt;VERSION&gt;/opal.min.js.gz
 </code></pre>
 
 <p>Where <code>&lt;VERSION&gt;</code> is the desired version number or <code>current</code>, examples:</p>
 
-<pre><code>//cdn.opalrb.org/opal/0.10.1/opal.js
-//cdn.opalrb.org/opal/0.9.4/date.min.js
-//cdn.opalrb.org/opal/current/base64.min.js.gz
+<pre><code>//cdn.opalrb.com/opal/0.10.1/opal.js
+//cdn.opalrb.com/opal/0.9.4/date.min.js
+//cdn.opalrb.com/opal/current/base64.min.js.gz
 </code></pre>
 
 <h2 id="license">License</h2>
 
-<p>See <a href="http://example.com/">http://opalrb.org</a>.</p>
+<p>See <a href="http://example.com/">http://opalrb.com</a>.</p>
 </body>
 </html>
     }
@@ -81,5 +81,5 @@ From the `opal` dir, assuming there's a checkout of the `gh-pages` branch of `op
 
 ## License
 
-See [http://opalrb.org](http://opalrb.org).
+See [http://opalrb.com](http://opalrb.com).
 
