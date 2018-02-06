@@ -32,9 +32,21 @@ rm_rf opal_version if opal_version.exist?
 git :clone, opal, opal_version, '--single-branch', '--branch', version, '--reference', opal
 
 cd opal_version.to_s do
-  git 'submodule', 'update', '--init', '--reference', opal.join('test/cruby/.git'), 'spec/mspec'
-    # '--reference', opal.join('spec/mspec/.git'),
-    # '--reference', opal.join('spec/ruby/.git')
+  references = [
+    'test/cruby',
+    'spec/mspec',
+    'spec/ruby',
+  ].map do |dir|
+    dir = opal.join("#{dir}/.git")
+    if dir.exist?
+      ['--reference', dir.to_s]
+    else
+      warn "#{dir} not found, use `git clone https://github.com/opal #{opal} --recursive` to speed up the generation"
+      nil
+    end
+  end.compact.flatten
+
+  git('submodule', 'update', '--init', '--jobs', '4', '--recommend-shallow', '--checkout', *references)
 
   sh 'bundle'
   sh 'bundle', 'exec', 'rake', 'dist', "DIR=#{root.join 'opal', version.gsub(/^v/, '')}"
