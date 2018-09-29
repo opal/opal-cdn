@@ -52,4 +52,16 @@ File.write root.join('bower.json'), JSON.pretty_generate(
   ]
 )
 
+puts %{
 
+  🚨 Remember to set a tag for Bower e.g.:
+
+      git commit -a
+      git push
+      git tag v#{version}
+      git push --tags
+
+    (see https://bower.io/docs/creating-packages/ for more info)
+
+
+}
