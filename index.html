@@ -9,9 +9,9 @@
   <link href="./stylesheets/application.css" rel="stylesheet" type="text/css">
   <script src="./javascripts/application.js" type="text/javascript"></script>
   <link href="http://code.ionicframework.com/ionicons/1.4.1/css/ionicons.min.css" rel="stylesheet" type="text/css">
-  <script src="opal/current/opal.min.js"></script>
-  <script src="opal/current/native.min.js"></script>
-  <script src="opal/current/opal-parser.min.js"></script>
+  <script src="opal/current/opal.min.js" onload="Opal.load('opal')"></script>
+  <script src="opal/current/native.min.js" onload="Opal.load('native')"></script>
+  <script src="opal/current/opal-parser.min.js" onload="Opal.load('opal-parser')"></script>
 </head>
 <body class="index">
 <nav class="navbar navbar-default opal-nav" role="navigation">
@@ -87,10 +87,6 @@
 
   <p>See <a href="http://opalrb.com">http://opalrb.com</a>.</p>
 </div>
-<script>
-  Opal.load('native');
-  Opal.load('opal-parser');
-</script>
 <script type="text/ruby">
   puts "Hello from the console! (printend with Opal v#{RUBY_ENGINE_VERSION})"
   class User
