@@ -21,7 +21,7 @@ versions = Dir["#{__dir__}/../opal/*"].map do |dir|
   {v: version, index: true}
 end.sort_by do |v|
   if %w[current master].include? v[:v]
-    Gem::Version.new('10000000000')
+    Gem::Version.new("10000000000.#{v[:v]}")
   else
     Gem::Version.new(v[:v])
   end
