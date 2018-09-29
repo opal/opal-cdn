@@ -51,3 +51,5 @@ cd opal_version.to_s do
   sh 'bundle'
   sh 'bundle', 'exec', 'rake', 'dist', "DIR=#{root.join 'opal', version.gsub(/^v/, '')}"
 end
+
+syste "#{__dir__}/build-index"
