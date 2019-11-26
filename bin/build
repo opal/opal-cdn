@@ -52,4 +52,15 @@ cd opal_version.to_s do
   sh 'bundle', 'exec', 'rake', 'dist', "DIR=#{root.join 'opal', version.gsub(/^v/, '')}"
 end
 
-syste "#{__dir__}/build-index"
+system "#{__dir__}/build-index"
+
+current = Dir['opal/*'].map { |path| File.basename(path) }.sort_by do |v|
+  Gem::Version.new(v) rescue Gem::Version.new('0.0')
+end.last
+
+system "#{__dir__}/set-current", current
+
+git 'commit', '-a', '-m', version
+git 'push'
+git 'tag', version
+git 'push', '--tags'
