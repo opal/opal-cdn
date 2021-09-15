@@ -61,6 +61,7 @@ end.select { |i| i =~ /^[0-9.]$/ }.last
 
 system "#{__dir__}/set-current", current
 
+git 'add', '.'
 git 'commit', '-a', '-m', version
 git 'push'
 git 'tag', version
