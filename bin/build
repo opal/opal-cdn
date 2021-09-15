@@ -49,6 +49,7 @@ cd opal_version.to_s do
   git('submodule', 'update', '--init', '--jobs', '4', '--recommend-shallow', '--checkout', *references)
 
   sh 'bundle'
+  sh 'npm', 'i'
   sh 'bundle', 'exec', 'rake', 'dist', "DIR=#{root.join 'opal', version.gsub(/^v/, '')}"
 end
 
