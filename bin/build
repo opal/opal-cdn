@@ -57,7 +57,7 @@ system "#{__dir__}/build-index"
 
 current = Dir['opal/*'].map { |path| File.basename(path) }.sort_by do |v|
   Gem::Version.new(v) rescue Gem::Version.new('0.0')
-end.last
+end.select { |i| i =~ /^[0-9.]$/ }.last
 
 system "#{__dir__}/set-current", current
 
