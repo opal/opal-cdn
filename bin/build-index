@@ -21,7 +21,9 @@ class Path < Struct.new(:path, :version)
   end
 
   def tag
-    %{<script src="#{url}" onload="Opal.require('#{module_name}')"></script>}
+    onload = ''
+    onload = %{ onload="Opal.require('#{module_name}')"} unless module_name == 'opal'
+    %{<script src="#{url}"#{onload}></script>}
   end
 end
 
