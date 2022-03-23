@@ -25,6 +25,8 @@ end
 
 ENV['GIT_DIR'] = opal.join('.git').to_s
 git :fetch, '--all', '--prune'
+git :checkout, 'master'
+git :reset, '--hard', 'origin/master'
 
 ENV['GIT_DIR'] = nil
 opal_version = root.join("tmp/#{version}")
@@ -64,5 +66,7 @@ system "#{__dir__}/set-current", current
 git 'add', '.'
 git 'commit', '-a', '-m', version
 git 'push'
-git 'tag', version
-git 'push', '--tags'
+unless version == 'master'
+  git 'tag', version
+  git 'push', '--tags'
+end
