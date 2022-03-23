@@ -6,7 +6,7 @@ Opal.modules["e2mmap"] = function(Opal) {
   function $rb_minus(lhs, rhs) {
     return (typeof(lhs) === 'number' && typeof(rhs) === 'number') ? lhs - rhs : lhs['$-'](rhs);
   }
-  var self = Opal.top, $nesting = [], nil = Opal.nil, $$$ = Opal.$$$, $$ = Opal.$$, $module = Opal.module, $send2 = Opal.send2, $find_super = Opal.find_super, $truthy = Opal.truthy, $send = Opal.send, $alias = Opal.alias, $hash2 = Opal.hash2, $gvars = Opal.gvars, $enc = Opal.enc;
+  var self = Opal.top, $nesting = [], nil = Opal.nil, $$$ = Opal.$$$, $$ = Opal.$$, $module = Opal.module, $send2 = Opal.send2, $find_super = Opal.find_super, $truthy = Opal.truthy, $send = Opal.send, $alias = Opal.alias, $hash2 = Opal.hash2, $gvars = Opal.gvars;
 
   Opal.add_stubs(['$<', '$bind', '$module_eval', '$Raise', '$class', '$extend', '$def_e2message', '$def_exception', '$instance_eval', '$[]=', '$-', '$new', '$const_defined?', '$remove_const', '$const_set', '$e2mm_message', '$nil?', '$caller', '$=~', '$[]', '$quote', '$shift', '$raise', '$sprintf', '$Fail', '$inspect', '$each', '$ancestors']);
   return (function($base, $parent_nesting) {
@@ -179,7 +179,7 @@ Opal.modules["e2mmap"] = function(Opal) {
         } else {
           return $gvars["@"]
         }; return nil; })();
-        if ($truthy(b['$[]'](0)['$=~'](Opal.regexp(["^", $$($nesting, 'Regexp').$quote($enc("./e2mmap.rb", "US-ASCII")), ":"])))) {
+        if ($truthy(b['$[]'](0)['$=~'](Opal.regexp(["^", $$($nesting, 'Regexp').$quote("./e2mmap.rb"), ":"])))) {
           b.$shift()};
         return self.$raise(err, $send(self, 'sprintf', [form].concat(Opal.to_a(rest))), b);
       } else {
