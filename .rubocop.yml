@@ -1,0 +1,450 @@
+require: rubocop-performance
+inherit_from: .rubocop/todo.yml
+
+AllCops:
+  TargetRubyVersion: 2.6
+  Exclude:
+    - CHANGELOG.md
+    - CONDUCT.md
+    - CONTRIBUTING.md
+    - Gemfile/**/*
+    - Gemfile.lock
+    - Guardfile/**/*
+    - HACKING.md
+    - LICENSE/**/*
+    - README.md
+    - Rakefile/**/*
+    - '*'
+    - __*
+    - __*/**/*
+    - appveyor.yml
+    - benchmark/**/*
+    - benchmark-ips/**/*
+    - bin/**/*
+    - build/**/*
+    - config.ru
+    - coverage/**/*
+    - docs/**/*
+    - examples/**/*
+    - exe/**/*
+    # - lib/**/*
+    - lib/opal/source_map/vlq.rb
+    - node_modules/**/*
+    # - opal/**/*
+    - opal.gemspec
+    - pkg/**/*
+    - spec/**/*
+    # - stdlib/**/*
+    - tasks/**/*
+    - test/**/*
+    - tmp/**/*
+    - vendored-minitest/**/*
+    - vendor/**/* # present in travis
+    # Files thate were copied from MRI as is
+    - 'stdlib/benchmark.rb'
+    - 'stdlib/observer.rb'
+    - 'stdlib/open-uri.rb'
+    - 'stdlib/stringio.rb'
+    - 'stdlib/source_map/*.rb'
+    - 'stdlib/racc/parser.rb'
+    - 'stdlib/e2mmap.rb'
+    - 'stdlib/matrix.rb'
+    - 'stdlib/matrix/*.rb'
+    - 'stdlib/pp.rb'
+    - 'stdlib/prettyprint.rb'
+    - 'stdlib/optparse.rb'
+    - 'stdlib/optparse/*.rb'
+    - 'stdlib/tmpdir.rb'
+    - 'stdlib/tempfile.rb'
+
+inherit_mode:
+  merge:
+    - Exclude
+
+Naming/MethodName:
+  Exclude:
+    # Ruby has methods like Integer/Float/Array
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Layout/ClosingParenthesisIndentation:
+  Enabled: false
+
+Layout/CommentIndentation:
+  # The following files use comments to show generated ruby code
+  Exclude:
+    - 'lib/opal/rewriters/binary_operator_assignment.rb'
+    - 'lib/opal/rewriters/logical_operator_assignment.rb'
+    - 'lib/opal/source_map/file.rb'
+
+# We need to support older rubies
+Layout/IndentHeredoc:
+  Enabled: false
+
+Style/FrozenStringLiteralComment:
+  Exclude:
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Layout/EmptyLineAfterMagicComment:
+  Exclude:
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Style/GlobalVars:
+  Exclude:
+    - 'opal/corelib/kernel.rb'
+    - 'stdlib/nodejs/irb.rb'
+    - 'stdlib/console.rb'
+    - 'stdlib/native.rb'
+    - 'stdlib/await.rb'
+
+Layout/ExtraSpacing:
+  Exclude:
+    # This files uses extra spaces to show an inheritance tree of error classes
+    - 'opal/corelib/error.rb'
+
+Layout/IndentArray:
+  EnforcedStyle: consistent
+
+Layout/SpaceAroundOperators:
+  Exclude:
+    - 'opal/corelib/error.rb'
+
+Lint/BooleanSymbol:
+  Exclude:
+    # There are AST nodes and rewriters with types :true and :false
+    - 'lib/opal/nodes/**/*.rb'
+    - 'lib/opal/rewriters/**/*.rb'
+
+Lint/InheritException:
+  Exclude:
+    - 'lib/opal/builder.rb'
+    - 'lib/opal/errors.rb'
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Lint/LiteralAsCondition:
+  Exclude:
+    # Opal supports if `...js...`
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Lint/Loop:
+  Exclude:
+    # This is for optimization purposes mostly
+    - 'opal/corelib/io.rb'
+
+# Allow the use of if/unless inside blocks
+Style/Next:
+  Enabled: false
+
+Lint/RescueException:
+  Exclude:
+    # That's what MRI does
+    - 'opal/corelib/enumerator.rb'
+    # Promises must care about all exceptions
+    - 'stdlib/promise.rb'
+    - 'opal/corelib/binding.rb'
+
+Lint/StringConversionInInterpolation:
+  Exclude:
+    # That's what MRI does
+    - 'opal/corelib/error.rb'
+
+Lint/UnusedBlockArgument:
+  Exclude:
+    # Variable from Ruby can be accessed in JS, rubocop can't catch it (but JSHint can)
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Lint/UnusedMethodArgument:
+  Exclude:
+    # Variable from Ruby can be accessed in JS, rubocop can't catch it (but JSHint can)
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Lint/UselessAssignment:
+  Exclude:
+    # Variable from Ruby can be accessed in JS, rubocop can't catch it (but JSHint can)
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Metrics/AbcSize:
+  Enabled: false
+
+Metrics/BlockLength:
+  Enabled: false
+
+Metrics/BlockNesting:
+  Enabled: false
+
+Metrics/ClassLength:
+  Enabled: false
+
+Metrics/CyclomaticComplexity:
+  Enabled: false
+
+Metrics/MethodLength:
+  Enabled: false
+
+Metrics/ModuleLength:
+  Enabled: false
+
+Metrics/PerceivedComplexity:
+  Enabled: false
+
+Metrics/ParameterLists:
+  Exclude:
+    # Some Ruby methods take 10 arguments
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Naming/BinaryOperatorParameterName:
+  Exclude:
+    # Opal follows MRI argument namings
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Naming/PredicateName:
+  # Ruby has "has_key?" method
+  NamePrefixBlacklist: is_, have_
+
+Performance/FlatMap:
+  Exclude:
+    # That's actually a definition of Enumerable#flat_map
+    - 'opal/corelib/enumerable.rb'
+
+Performance/RegexpMatch:
+  # This cop converts =~ to match?
+  # But this method was introduced only in 2.4
+  Enabled: false
+
+Performance/UnfreezeString:
+  Enabled: false
+
+Style/AsciiComments:
+  Enabled: false
+
+Style/CaseEquality:
+  Exclude:
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+    - 'lib/opal/config.rb'
+
+Style/ClassAndModuleChildren:
+  Enabled: false
+
+Style/ClassVars:
+  Exclude:
+    # These classes use class variables on purpose
+    - 'lib/opal/rewriters/binary_operator_assignment.rb'
+    - 'lib/opal/rewriters/logical_operator_assignment.rb'
+
+Style/CommandLiteral:
+  # This cop converts `` to %x{}
+  Enabled: false
+
+Style/Documentation:
+  Enabled: false
+
+Style/EmptyMethod:
+  # There are a lot of empty methods that are required to make MSpec working
+  Exclude:
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Style/IfUnlessModifier:
+  Enabled: false
+
+Style/InfiniteLoop:
+  # while true is faster than loop
+  Enabled: false
+
+Style/InverseMethods:
+  # That's what MRI does
+  Exclude:
+    - 'opal/corelib/basic_object.rb'
+    - 'opal/corelib/kernel.rb'
+
+Style/MethodMissingSuper:
+  # Base Opal classes simply can't or shouldn't call super for #method_missing
+  Exclude:
+    - 'opal/corelib/basic_object.rb'
+    - 'opal/corelib/kernel.rb'
+    - 'opal/corelib/string/inheritance.rb'
+    - 'stdlib/native.rb'
+    - 'stdlib/delegate.rb'
+    - 'stdlib/ostruct.rb'
+
+Style/MissingRespondToMissing:
+  Enabled: true
+
+Style/NumericPredicate:
+  Enabled: false
+
+Style/ParallelAssignment:
+  Enabled: false
+
+Style/PercentLiteralDelimiters:
+  PreferredDelimiters:
+    default: '{}'
+  Exclude:
+    # Opal has a convention of %x{}
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Style/SafeNavigation:
+  # Opal supports old versions of Ruby that don't have safe navigator
+  Enabled: false
+
+Style/SpecialGlobalVars:
+  Enabled: false
+
+Style/StderrPuts:
+  Enabled: false
+
+Style/YodaCondition:
+  Exclude:
+    # In Opal there are lot of cases like
+    # if `..js..` == object
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Layout/MultilineAssignmentLayout:
+  EnforcedStyle: same_line
+
+Style/TrailingCommaInArguments:
+  # Any style is allowed
+  Enabled: false
+
+Layout/AlignParameters:
+  EnforcedStyle: with_fixed_indentation
+
+Layout/MultilineMethodCallBraceLayout:
+  EnforcedStyle: new_line
+
+Style/Lambda:
+  EnforcedStyle: literal
+
+Layout/EmptyLines:
+  # Empty lines can be used to separate interface and implementation
+  Enabled: false
+
+Style/EmptyElse:
+  # Empty 'else' can be used to indicate a potential empty branch condition
+  EnforcedStyle: nil
+
+Lint/EmptyWhen:
+  # Empty 'when' can be used to indicate a potential empty branch condition
+  Enabled: false
+
+Style/StringLiterals:
+  Exclude:
+    # Nodes are more like DSL, so they are allowed to have any internal rules
+    # that make the code more readable
+    - 'lib/opal/nodes/**/*.rb'
+
+Style/TrailingUnderscoreVariable:
+  # We treat a, = *b construction as a potential source of bugs
+  Enabled: false
+
+Style/WhileUntilModifier:
+  Enabled: false
+
+Style/RegexpLiteral:
+  # Use the style that you like more, but if there are slashes or backslashe
+  # prefer %r{} syntax.
+  # Rubocop doesn't check for backslashes, so this rule is disabled.
+  Enabled: false
+
+Naming/FileName:
+  Exclude:
+    - 'stdlib/opal-builder.rb'
+    - 'stdlib/nodejs/open-uri.rb'
+    - 'stdlib/opal-parser.rb'
+    - 'stdlib/opal-platform.rb'
+    - 'stdlib/opal-source-maps.rb'
+    - 'stdlib/opal-replutils.rb'
+
+Naming/ConstantName:
+  Exclude:
+    # MRI has a constant BigDecimal::SIGN_NaN
+    - 'stdlib/bigdecimal.rb'
+
+Security/Eval:
+  Exclude:
+    # That's what parser does
+    - 'stdlib/opal-parser.rb'
+
+Naming/AccessorMethodName:
+  Exclude:
+    # StringScanner has method 'get_byte'
+    - 'stdlib/strscan.rb'
+    # Exception has method 'set_backtrace'
+    - 'opal/corelib/error.rb'
+
+Style/RescueStandardError:
+  Enabled: false
+
+Style/TrailingCommaInArrayLiteral:
+  # Any style is allowed
+  Enabled: false
+
+Style/TrailingCommaInHashLiteral:
+  # Any style is allowed
+  Enabled: false
+
+Naming/UncommunicativeMethodParamName:
+  Exclude:
+    # This file uses parser's code that doesn't match our styling requirements
+    - 'lib/opal/parser/patch.rb'
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Lint/BigDecimalNew:
+  Exclude:
+    # That's the implementation of the Kernel#BigDecimal
+    - 'stdlib/bigdecimal/kernel.rb'
+
+Style/MutableConstant:
+  Exclude:
+    - 'opal/**/*.rb'
+    - 'stdlib/**/*.rb'
+
+Style/EmptyCaseCondition:
+  Enabled: false
+
+
+# Use whatever suites the situation, sometimes assign_inside_condition is
+# more readable over assign_to_condition despite the risk of repeating the
+# variable name.
+Style/ConditionalAssignment:
+  Enabled: false
+
+Naming/MemoizedInstanceVariableName:
+  Exclude:
+    - lib/opal/parser/patch.rb # it's a monkey-patch on the parser gem
+    - lib/opal/nodes/rescue.rb # we know what we are doing here and no, it's not memoization
+
+Style/AccessModifierDeclarations:
+  Enabled: false
+
+Style/MultipleComparison:
+  Enabled: false
+
+Layout/EmptyLineAfterGuardClause:
+  Enabled: false
+
+Layout/AlignHash:
+  Enabled: false
+
+# No way to set multiple preferred names
+Naming/RescuedExceptionsVariableName:
+  Enabled: false
+
+Style/Semicolon:
+  AllowAsExpressionSeparator: true
+
+Layout/EmptyLinesAroundExceptionHandlingKeywords:
+  Enabled: false

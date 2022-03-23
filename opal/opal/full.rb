@@ -1,0 +1,8 @@
+::Object.autoload :Marshal, 'corelib/marshal'
+::Object.require 'corelib/string/unpack'
+::Object.require 'corelib/array/pack'
+::Object.autoload :ObjectSpace, 'corelib/object_space'
+::Object.require 'corelib/pattern_matching/base'
+::Object.autoload :PatternMatching, 'corelib/pattern_matching'
+::Object.autoload :TracePoint, 'corelib/trace_point'
+::Object.require 'corelib/binding'

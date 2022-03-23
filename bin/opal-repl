@@ -1,0 +1,3 @@
+#!/usr/bin/env ruby
+
+exec "#{__dir__}/opal", '--repl', *ARGV

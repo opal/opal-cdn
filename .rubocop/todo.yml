@@ -1,0 +1,43 @@
+# All items in this file require fixing
+
+Metrics/LineLength:
+  Enabled: false
+
+Lint/AssignmentInCondition:
+  Exclude:
+    - 'lib/opal/ast/node.rb'
+    - 'lib/opal/compiler.rb'
+    - 'lib/opal/nodes/helpers.rb'
+    - 'lib/opal/nodes/logic.rb'
+    - 'lib/opal/nodes/masgn.rb'
+    - 'lib/opal/nodes/runtime_helpers.rb'
+    - 'lib/opal/nodes/scope.rb'
+    - 'lib/opal/nodes/top.rb'
+    - 'lib/tilt/opal.rb'
+    - 'opal/corelib/comparable.rb'
+    - 'opal/corelib/complex.rb'
+    - 'opal/corelib/marshal/write_buffer.rb'
+
+Style/GuardClause:
+  Enabled: false
+
+Style/ModuleFunction:
+  Exclude:
+    - 'lib/opal/config.rb'
+    - 'lib/opal/util.rb'
+    - 'stdlib/nodejs/fileutils.rb'
+    - 'stdlib/js.rb'
+
+Style/MutableConstant:
+  Exclude:
+    - 'lib/opal/nodes/call.rb'
+    - 'lib/opal/util.rb'
+
+Lint/HandleExceptions:
+  Exclude:
+    - 'stdlib/ostruct.rb'
+
+Lint/ToJSON:
+  Exclude:
+    - 'lib/opal/source_map/map.rb'
+    - 'stdlib/json.rb'
