@@ -9,5 +9,5 @@ test -d "opal/$version_dir" || exit 1
 
 git commit -a -m "$version" && \
 git push && \
-git tag "$version" && \
+git tag "$version" -m "Release $version" && \
 git push --tags
