@@ -22,7 +22,7 @@ class Path < Struct.new(:path, :version)
 
   def tag
     onload = ''
-    unless ['opal opal/base opal/mini'].include? module_name
+    unless %w[opal opal/base opal/mini].include? module_name
       onload = %{ onload="Opal.require('#{module_name}')"}
     end
     %{<script src="#{url}"#{onload}></script>}
