@@ -30,7 +30,7 @@ end
 versions = Dir["#{__dir__}/../opal/*"].map do |dir|
   version = File.basename(dir)
   cd dir do
-    paths = Dir['*.js'].sort
+    paths = Dir['**/*.js'].sort
     index_version = version == 'current' ? current_version : version
     p version: version, paths: paths.size
     paths = paths.map { |path| Path.new(path, index_version) }
